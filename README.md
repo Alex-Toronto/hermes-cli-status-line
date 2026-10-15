@@ -5,7 +5,7 @@ A plugin for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) de
 ![status line](docs/status-line.png)
 
 ```
-☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ 4h 5m │ Σ48.1M │ Claude 5h 14% left wk 61% left │ GPT wk 36% left
+☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ ⚙ 2 │ 4h 5m │ Σ48.1M │ Claude 5h 14% wk 61% │ GPT wk 36%
 ```
 
 Hover over any item for exact numbers and a short explanation.
@@ -19,14 +19,20 @@ Hover over any item for exact numbers and a short explanation.
 | `↑ 15 t/s` | Average output speed over the last ~10 model calls. |
 | `⚡ ~42 t/s` | Output speed right now: text streaming into the chat over the last 3 seconds (estimated at ~4 characters per token). Shows `–` while idle or while tools run. |
 | `🗜️ 1` | How many times Hermes has compressed older turns to free up context. |
+| `⚙ 2` | Background terminal commands this chat started (servers, builds, watchers) that are still running. Hover to see them. Appears only while one is running. |
 | `4h 5m` | Session duration. |
 | `Σ48.1M` | Total tokens for the session (input + output). |
-| `Claude 5h … left wk … left` | Claude subscription allowances remaining, with reset times on hover. Only reported windows appear. |
-| `GPT wk … left` | ChatGPT/Codex subscription allowances remaining. Weekly-only accounts show no five-hour placeholder. |
+| `Claude 5h … wk …` | Claude subscription limits: % of the 5-hour and weekly allowances used, with reset times on hover. Only reported windows appear. |
+| `GPT wk …` | ChatGPT/Codex subscription limits, shown the same way. Weekly-only accounts show no five-hour placeholder. |
 
-The limit items appear only for providers you're signed into through a subscription login (OAuth): Anthropic (`anthropic`) and ChatGPT/Codex (`openai-codex`). They update about every 2 minutes, including when a provider is absent or its usage cache is cold. Window focus and reconnect do not trigger extra subscription-query refreshes. A cold cache may therefore take until the next poll to appear.
+The limit items appear only for providers you're signed into through a subscription login (OAuth): Anthropic (`anthropic`) and ChatGPT/Codex (`openai-codex`). They update every 2 minutes, whether or not a provider is present. If the first check after the app opens finds no data yet, one extra check runs 20 seconds later; otherwise there are no faster checks, and switching windows or reconnecting doesn't trigger extra ones.
 
-Subscription percentages show **remaining** allowance; warning colours become more severe as that allowance runs out. Context fullness and cache-hit percentages keep their original meaning. Unknown window labels are preserved instead of being guessed as five-hour or weekly limits. The screenshot above predates this remaining-allowance display.
+**Click either limit item to switch between % used and % left.** Your choice is remembered. The two views use different colours:
+
+- **Used** (default): green below 50%, amber from 50%, red above 80%, bright red at 95%, the same as the context meter.
+- **Left** (`88% left`): the theme's accent colour while plenty remains, amber below 50% left, red below 20%, bright red at 5% or less.
+
+The hover card always shows both numbers. Windows with unfamiliar names are shown under their own names rather than guessed as 5-hour or weekly. Model-specific allowances (such as Claude's Opus-only week) appear in the hover card only.
 
 The line shortens to fit the width of the chat box. Below 76 characters it uses `·` separators and only the context percentage. Below 52 characters it shows just the model and session time. These are the same cut-offs the terminal status bar uses.
 
@@ -59,10 +65,11 @@ The plugin is one JavaScript file with no build step. It reads only what the Her
 - the model per chat (`session.status`)
 - subscription limits from the app's model list (`model.options`), which uses Hermes's own cached limit data, so the line never makes the app wait
 - the live speed from streamed text (`message.delta` / `reasoning.delta` events)
+- background terminal commands for the chat you're in (`process.list`, checked every 15 seconds)
 
 Number formats and colour thresholds are copied from the terminal's status bar (`hermes_cli/cli_status_bar_mixin.py`).
 
-It sends nothing anywhere and stores only its on/off setting.
+It sends nothing anywhere and stores only two settings: on/off and used/left.
 
 ## Compatibility
 
@@ -76,7 +83,11 @@ Run the dependency-free regression tests with Node.js:
 node --test limits.test.cjs
 ```
 
-These tests use synthetic usage fixtures and a minimal SDK stub to exercise polling options, window selection, allowance formatting, hover text, and warning colours. They do not replace an in-app rendering check.
+These tests use made-up usage data and a minimal stand-in for the app to check polling, window selection, the used/left switch, labels, hover text and colours. They don't replace checking it in the app.
+
+## Credits
+
+Subscription polling fixes, weekly-only window handling and the tests: [@audioclass](https://github.com/audioclass) ([#1](https://github.com/Alex-Toronto/hermes-cli-status-line/pull/1)).
 
 ## Licence
 
