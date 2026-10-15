@@ -148,6 +148,12 @@ function recordDeltaAt(sid, chars, now) {
   } else {
     bursts.set(sid, { start: now, end: now, chars })
   }
+  // Memory cap: only the most recently streaming chats are kept.
+  if (bursts.size > MAX_TRACKED_CHATS) {
+    const oldest = [...bursts.entries()].sort((a, b) => a[1].end - b[1].end)[0][0]
+    bursts.delete(oldest)
+    liveSamples.delete(oldest)
+  }
 }
 
 function recordDelta(event) {
@@ -190,126 +196,60 @@ function useLiveRate(sid) {
   return { ...state, busy }
 }
 
-// ── session average speed ──────────────────────────────────────────────────
-// Hermes only exposes avg_tps / avg_latency_s over its last ≤10 model calls
-// (agent._api_latency_history, deque maxlen 10). Every time 10 NEW calls have
-// passed, that window holds only calls not yet counted, so it is saved as a
-// closed block; the session average combines the closed blocks (plus the live
-// window while it does not overlap them). Blocks persist per stored session.
-
-function windowOf(u) {
-  const calls = Number(u?.calls || 0)
-  const tps = Number(u?.avg_tps)
-  const lat = Number(u?.avg_latency_s)
-  if (!calls || !(tps > 0) || !(lat > 0)) return null
-  const n = Math.min(calls, 10)
-  const seconds = lat * n
-  return { calls, n, start: calls - n + 1, seconds, out: tps * seconds }
-}
-
-// state: { blocks: [{ n, out, seconds }], closedEnd, base } ; base offsets a counter reset.
-function sessionAvgStep(state, u) {
-  const w = windowOf(u)
-  if (!w) return state
-  let s = state ? { ...state, blocks: [...state.blocks] } : null
-  if (!s) {
-    // First sighting: earlier calls (before this window) are unknown.
-    s = { blocks: [], closedEnd: w.start - 1, base: 0 }
-  } else if (w.calls < s.closedEnd) {
-    // Counter went backwards (agent rebuilt on resume): start a new segment.
-    s.closedEnd = w.start - 1
-  }
-  if (w.calls - s.closedEnd >= 10) {
-    s.blocks.push({ n: w.n, out: w.out, seconds: w.seconds })
-    s.closedEnd = w.calls
-    if (s.blocks.length > 500) s.blocks.splice(0, s.blocks.length - 500)
-  }
-  return s
-}
-
-function sessionAvgValue(state, u) {
-  const w = windowOf(u)
-  let out = 0, seconds = 0, calls = 0
-  for (const b of state?.blocks || []) { out += b.out; seconds += b.seconds; calls += b.n }
-  // The live window counts too while it covers only calls not in a block.
-  if (w && state && w.start > state.closedEnd && w.calls > state.closedEnd) {
-    out += w.out; seconds += w.seconds; calls += w.n
-  }
-  if (!(seconds > 0)) return null
-  return { tps: out / seconds, calls, total: w ? w.calls : calls, seconds }
-}
-
-const $sessionAvg = atom({}) // stored session id → state
-let saveSessionAvg = () => {}
-
-function useSessionAvg(storedId, usage) {
-  const all = useValue($sessionAvg)
-  useEffect(() => {
-    if (!storedId || !usage) return
-    const cur = $sessionAvg.get()
-    const next = sessionAvgStep(cur[storedId], usage)
-    if (next !== cur[storedId]) {
-      const map = { ...cur, [storedId]: { ...next, t: Date.now() } }
-      const ids = Object.keys(map)
-      if (ids.length > 50) {
-        ids.sort((a, b) => (map[a].t || 0) - (map[b].t || 0)).slice(0, ids.length - 50).forEach(id => delete map[id])
-      }
-      $sessionAvg.set(map)
-      saveSessionAvg(map)
-    }
-  }, [storedId, usage])
-  return storedId ? sessionAvgValue(all[storedId], usage) : null
-}
-
 // ── subagents ──────────────────────────────────────────────────────────────
-// subagent.start / subagent.complete arrive on the PARENT chat's session id.
-// Hermes reports a subagent's tokens only when it finishes (output_tokens,
-// duration_seconds = whole run incl. tool time), and does not relay its text.
-const SUBAGENT_STALE_MS = 3600_000
+// Running subagents come straight from Hermes (subagent.list, the chat's live
+// children). Hermes reports a subagent's tokens only in its subagent.complete
+// event (output_tokens; duration_seconds = whole run incl. tool time), so the
+// last few finished runs are held in memory only — never saved — and forgotten
+// when the app closes.
 const SUBAGENT_LINGER_MS = 300_000
-const $subagents = atom({}) // parent sid → { running: { key: {...} }, done: [...] }
-
-function subagentKey(p) {
-  return String(p.subagent_id || p.child_session_id || `${p.delegation_id || ''}#${p.task_index ?? ''}`)
-}
+const MAX_TRACKED_CHATS = 20
+const $subagentDone = atom({}) // parent sid → [{ goal, status, out, seconds, ended }] (≤5)
+const $subagentTick = atom(0) // bumped by subagent events so the running list refetches at once
 
 function subagentEvent(type, event, now = Date.now()) {
   const sid = event?.session_id
-  const p = event?.payload || {}
   if (!sid) return
-  const all = { ...$subagents.get() }
-  const cur = all[sid] || { running: {}, done: [] }
-  const entry = { running: { ...cur.running }, done: [...cur.done] }
-  const key = subagentKey(p)
-  if (type === 'subagent.start') {
-    entry.running[key] = { goal: String(p.goal || p.text || ''), model: String(p.model || ''), started: now }
-  } else if (type === 'subagent.complete') {
-    const r = entry.running[key]
-    delete entry.running[key]
-    entry.done.unshift({
-      goal: String(p.goal || r?.goal || p.summary || ''),
-      model: String(p.model || r?.model || ''),
-      status: String(p.status || ''),
-      out: Number(p.output_tokens || 0),
-      seconds: Number(p.duration_seconds || (r ? (now - r.started) / 1000 : 0)),
-      calls: Number(p.api_calls || 0),
-      ended: now
-    })
-    entry.done = entry.done.slice(0, 5)
-  } else {
-    return
+  $subagentTick.set($subagentTick.get() + 1)
+  if (type !== 'subagent.complete') return
+  const p = event?.payload || {}
+  const all = { ...$subagentDone.get() }
+  all[sid] = [{
+    goal: String(p.goal || p.summary || ''),
+    status: String(p.status || ''),
+    out: Number(p.output_tokens || 0),
+    seconds: Number(p.duration_seconds || 0),
+    ended: now
+  }, ...(all[sid] || [])].slice(0, 5)
+  // Memory cap: keep only the most recently active chats.
+  const ids = Object.keys(all)
+  if (ids.length > MAX_TRACKED_CHATS) {
+    ids.sort((a, b) => all[a][0].ended - all[b][0].ended).slice(0, ids.length - MAX_TRACKED_CHATS).forEach(id => delete all[id])
   }
-  all[sid] = entry
-  $subagents.set(all)
+  $subagentDone.set(all)
 }
 
-function subagentView(sid, now) {
-  const e = sid && $subagents.get()[sid]
-  if (!e) return null
-  const running = Object.values(e.running).filter(r => now - r.started < SUBAGENT_STALE_MS)
-  const recent = e.done.filter(d => now - d.ended < SUBAGENT_LINGER_MS)
+function useSubagents(runtimeId, now) {
+  const tick = useValue($subagentTick)
+  const doneAll = useValue($subagentDone)
+  const { data } = useQuery({
+    queryKey: [ID, 'subagents', runtimeId, tick],
+    queryFn: () => host.request('subagent.list', { session_id: runtimeId }),
+    enabled: Boolean(runtimeId),
+    staleTime: 15_000,
+    // Poll only while something runs; start/complete events trigger a fresh read anyway.
+    refetchInterval: q => ((q.state.data?.subagents ?? []).some(s => !s.status || s.status === 'running') ? 20_000 : false),
+    refetchOnWindowFocus: false,
+    retry: false
+  })
+  return subagentView(data?.subagents ?? [], (runtimeId && doneAll[runtimeId]) || [], now)
+}
+
+function subagentView(list, done, now) {
+  const running = list.filter(s => !s.status || s.status === 'running')
+  const recent = done.filter(d => now - d.ended < SUBAGENT_LINGER_MS)
   if (!running.length && !recent.length) return null
-  return { running, done: e.done }
+  return { running, done }
 }
 
 // The focused chat's real model/provider. host.state.model is only the app-wide
@@ -321,8 +261,11 @@ function useSessionModel(runtimeId) {
     queryKey: [ID, 'session-status', runtimeId, tick],
     queryFn: () => host.request('session.status', { session_id: runtimeId }),
     enabled: Boolean(runtimeId),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    // A model switch arrives as a session.info event (bumps tick → refetch);
+    // the slow poll is only a safety net.
+    staleTime: 300_000,
+    refetchInterval: 300_000,
+    refetchOnWindowFocus: false,
     retry: 1
   })
   const m = /^Model:\s*(.+?)\s*\(([^()]*)\)\s*$/m.exec(String(data?.output || ''))
@@ -331,16 +274,18 @@ function useSessionModel(runtimeId) {
 }
 
 function useSessionStartedAt(storedId) {
+  const matches = s => s.id === storedId || s.resolved_id === storedId || s._lineage_root_id === storedId
+  // A chat's start time never changes: read once per chat, re-asking only
+  // (every 30 s) while a brand-new chat hasn't reached the list yet.
   const { data } = useQuery({
-    queryKey: [ID, 'session-list'],
+    queryKey: [ID, 'session-start', storedId],
     queryFn: () => host.request('session.list', { limit: 100 }),
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+    staleTime: Infinity,
+    refetchInterval: q => ((q.state.data?.sessions ?? []).some(matches) ? false : 30_000),
+    refetchOnWindowFocus: false,
     enabled: Boolean(storedId)
   })
-  const row = (data?.sessions ?? []).find(
-    s => s.id === storedId || s.resolved_id === storedId || s._lineage_root_id === storedId
-  )
+  const row = (data?.sessions ?? []).find(matches)
   const started = Number(row?.started_at || 0)
   return started > 1e12 ? started / 1000 : started
 }
@@ -399,11 +344,37 @@ function limitsRefetchInterval(query) {
 }
 
 const $limitMode = atom('used') // 'used' | 'left'
-let saveLimitMode = () => {}
 function toggleLimitMode() {
-  const next = $limitMode.get() === 'left' ? 'used' : 'left'
-  $limitMode.set(next)
-  saveLimitMode(next)
+  $limitMode.set($limitMode.get() === 'left' ? 'used' : 'left')
+}
+
+// Keys earlier versions saved; removed on load so the plugin leaves nothing behind.
+const LEGACY_STORAGE_KEYS = ['visible', 'limitMode', 'sessionAvg']
+
+// Hide anything in displayed text that looks like a credential: KEY=value,
+// --token value / --password=value, "Authorization: Bearer x", URL user:pass@,
+// and well-known key shapes (sk-…, ghp_…, gho_…, xoxb-…, AKIA…, JWTs).
+const SECRET_NAME = '(?:[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|AUTH|CREDENTIALS?|COOKIE|SESSION)[A-Za-z0-9_]*)'
+const SECRET_PATTERNS = [
+  new RegExp(`\\b(${SECRET_NAME})(\\s*[=:]\\s*)(?!(?:Bearer|Basic)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
+  new RegExp(`(--?${SECRET_NAME})(\\s+|=)(?!(?:Bearer|Basic)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
+  /\b(Bearer|Basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi,
+  /(\/\/[^\s/:@]+:)([^\s@/]+)(@)/g,
+  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}\b/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{12,}\b/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bA(?:KIA|SIA)[A-Z0-9]{16}\b/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
+]
+
+function redactSecrets(text) {
+  let s = String(text ?? '')
+  s = s.replace(SECRET_PATTERNS[2], (_, k, sep) => `${k}${sep}••••`)
+  s = s.replace(SECRET_PATTERNS[0], (_, k, sep) => `${k}${sep}••••`)
+  s = s.replace(SECRET_PATTERNS[1], (_, k, sep) => `${k}${sep}••••`)
+  s = s.replace(SECRET_PATTERNS[3], (_, a, __, b) => `${a}••••${b}`)
+  for (const re of SECRET_PATTERNS.slice(4)) s = s.replace(re, '••••')
+  return s
 }
 
 // Background terminal processes owned by the focused chat (the same list the
@@ -562,9 +533,8 @@ function StatusLine() {
   const limits = useAccountLimits()
   const limitMode = useValue($limitMode)
   const procs = useBackgroundProcesses(runtimeId, visible)
-  const sessionAvg = useSessionAvg(storedId, usage)
-  useValue($subagents)
   const now = useNow(5_000)
+  const subs = useSubagents(runtimeId, now)
   const cols = useColumns(ref, visible)
 
   if (!visible) return null
@@ -639,19 +609,18 @@ function StatusLine() {
         }
       })
     }
-    if (wide && sessionAvg) {
-      const missing = Math.max(0, sessionAvg.total - sessionAvg.calls)
-      const last10 = typeof u.avg_tps === 'number' && u.avg_tps > 0 ? `${u.avg_tps.toFixed(1)} tokens/second` : '—'
+    if (wide && typeof u.avg_tps === 'number' && u.avg_tps > 0) {
+      const covered = Math.min(Number(u.calls || 0), 10)
       segs.push({
-        parts: [part('dim', `↑ ${Math.round(sessionAvg.tps)} t/s`)],
+        parts: [part('dim', `↑ ${Math.round(u.avg_tps)} t/s`)],
         card: {
-          title: 'Average output speed (session)',
+          title: 'Average output speed',
           rows: [
-            ['Session', `${sessionAvg.tps.toFixed(1)} tokens/second`],
-            ['Covers', `${n(sessionAvg.calls)} of ${n(sessionAvg.total)} model calls`],
-            ['Last 10 calls', last10]
-          ],
-          note: `Output tokens divided by the time the model spent answering, across this session. Hermes only keeps timing for its last 10 calls, so the plugin saves it in blocks of 10 and updates every 10 calls.${missing ? ` ${n(missing)} earlier calls happened before the plugin could record them and aren't included.` : ''}`
+            ['Speed', `${u.avg_tps.toFixed(1)} tokens/second`],
+            ['Covers', `last ${covered} model ${covered === 1 ? 'call' : 'calls'}`],
+            typeof u.avg_latency_s === 'number' ? ['Avg call time', `${u.avg_latency_s.toFixed(1)} s`] : null
+          ].filter(Boolean),
+          note: 'Output tokens divided by the time the model spent answering, over the last 10 model calls. Hermes keeps timing for only those 10 calls, and this plugin saves nothing, so it is a rolling average rather than a whole-session one.'
         }
       })
     }
@@ -700,28 +669,30 @@ function StatusLine() {
           title: `Background ${procs.length === 1 ? 'process' : 'processes'}`,
           rows: procs.slice(0, 6).map(p => [
             p.uptime_seconds != null ? durationCompact(Number(p.uptime_seconds)) : '·',
-            String(p.command || p.session_id || '').replace(/\s+/g, ' ').slice(0, 60)
+            redactSecrets(String(p.command || p.session_id || '')).replace(/\s+/g, ' ').slice(0, 60)
           ]),
-          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. They use no AI tokens. Checked every 15 s.`
+          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. Anything that looks like a key, token or password is hidden as ••••. They use no AI tokens. Checked every 15 s.`
         }
       })
     }
-    const subs = subagentView(runtimeId, now)
     if (subs) {
       const speed = d => (d.seconds > 0 && d.out > 0 ? `${(d.out / d.seconds).toFixed(1)} t/s` : '—')
-      const short = s => (s || 'subagent').replace(/\s+/g, ' ').slice(0, 40)
+      const short = s => redactSecrets(s || 'subagent').replace(/\s+/g, ' ').slice(0, 40)
       segs.push({
         parts: [part(subs.running.length ? 'strong' : 'dim', `⛓ ${subs.running.length}`, Boolean(subs.running.length))],
         card: {
           title: 'Subagents',
           rows: [
-            ...subs.running.map(r => [`running ${durationCompact((now - r.started) / 1000)}`, short(r.goal)]),
+            ...subs.running.map(r => [
+              r.started_at ? `running ${durationCompact(Math.max(0, now / 1000 - Number(r.started_at)))}` : 'running',
+              short(r.goal)
+            ]),
             ...subs.done.map(d => [
               `${d.status === 'completed' || !d.status ? 'done' : d.status} · ${speed(d)}`,
               `${short(d.goal)} (${n(d.out)} tokens, ${durationCompact(d.seconds)})`
             ])
           ],
-          note: 'Helpers this chat started. Hermes reports a subagent\'s tokens only when it finishes, so speeds appear afterwards: its output tokens divided by its whole run time, which includes time spent running tools. Shown while any run, and for 5 minutes after.'
+          note: 'Helpers this chat started, as Hermes lists them. Hermes reports a subagent\'s tokens only when it finishes, so speeds appear afterwards: its output tokens divided by its whole run time, which includes time spent running tools. Finished runs are kept in memory only and vanish when the app closes. Shown while any run, and for 5 minutes after.'
         }
       })
     }
@@ -762,12 +733,11 @@ export default {
   id: ID,
   name: 'CLI Status Line',
   register(ctx) {
-    $visible.set(ctx.storage.get('visible', true))
-    $limitMode.set(ctx.storage.get('limitMode', 'used') === 'left' ? 'left' : 'used')
-    saveLimitMode = mode => ctx.storage.set('limitMode', mode)
-    const savedAvg = ctx.storage.get('sessionAvg', {})
-    $sessionAvg.set(savedAvg && typeof savedAvg === 'object' ? savedAvg : {})
-    saveSessionAvg = map => ctx.storage.set('sessionAvg', map)
+    // Nothing is saved: settings reset to defaults when the app starts. Remove
+    // anything earlier versions of this plugin saved.
+    for (const key of LEGACY_STORAGE_KEYS) ctx.storage.remove(key)
+    $visible.set(true)
+    $limitMode.set('used')
 
     ctx.register({
       id: 'line',
@@ -793,9 +763,7 @@ export default {
         detail: () => ($visible.get() ? 'on' : 'off'),
         detailVariant: 'state',
         run: () => {
-          const next = !$visible.get()
-          $visible.set(next)
-          ctx.storage.set('visible', next)
+          $visible.set(!$visible.get())
         }
       }
     })
