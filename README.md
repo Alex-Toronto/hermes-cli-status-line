@@ -5,7 +5,7 @@ A plugin for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) de
 ![status line](docs/status-line.png)
 
 ```
-☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ ⚙ 2 │ 4h 5m │ Σ48.1M │ Claude 5h 14% wk 61% │ GPT wk 36%
+☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ ⚙ 2 │ ⛓ 1 │ 4h 5m │ Σ48.1M │ Claude 5h 14% wk 61% │ GPT wk 36%
 ```
 
 Hover over any item for exact numbers and a short explanation.
@@ -16,10 +16,11 @@ Hover over any item for exact numbers and a short explanation.
 | `202K/500K` | Context used out of the model's context window. `~` means it's an estimate. |
 | `[████░░░░░░] 40%` | How full the context is. Green below 50%, amber from 50%, red above 80%, bright red at 95%. |
 | `◎ 97.0%` | Prompt-cache hit rate: how much of the input the provider re-used from its cache. |
-| `↑ 15 t/s` | Average output speed over the last ~10 model calls. |
-| `⚡ ~42 t/s` | Output speed right now: text streaming into the chat over the last 3 seconds (estimated at ~4 characters per token). Shows `–` while idle or while tools run. |
+| `↑ 15 t/s` | Average output speed for the session: output tokens ÷ time the model spent answering. Hermes keeps timing for only its last 10 calls, so the plugin saves it in blocks of 10 (it updates every 10 calls). The hover card shows how many calls are covered, plus Hermes's own last-10-call figure. |
+| `⚡ ~42 t/s` | Output speed right now: text streaming into the chat over the last 5 seconds (estimated at ~4 characters per token). When streaming stops, the last stretch stays shown, dimmed (`⚡ ~40 t/s last`). Tool calls and reading files or images aren't streamed, so they don't move it. |
 | `🗜️ 1` | How many times Hermes has compressed older turns to free up context. |
 | `⚙ 2` | Background terminal commands this chat started (servers, builds, watchers) that are still running. Hover to see them. Appears only while one is running. |
+| `⛓ 1` | Subagents (helpers) this chat started that are still running. Hermes reports a subagent's tokens only when it finishes, so the hover card then shows its speed: output tokens ÷ its whole run time, including time spent running tools. Shown while any run and for 5 minutes after. |
 | `4h 5m` | Session duration. |
 | `Σ48.1M` | Total tokens for the session (input + output). |
 | `Claude 5h … wk …` | Claude subscription limits: % of the 5-hour and weekly allowances used, with reset times on hover. Only reported windows appear. |
@@ -69,7 +70,7 @@ The plugin is one JavaScript file with no build step. It reads only what the Her
 
 Number formats and colour thresholds are copied from the terminal's status bar (`hermes_cli/cli_status_bar_mixin.py`).
 
-It sends nothing anywhere and stores only two settings: on/off and used/left.
+It uses no AI tokens and sends nothing anywhere. It stores two settings (on/off and used/left) and the saved speed blocks for your 50 most recent chats.
 
 ## Compatibility
 
@@ -80,10 +81,10 @@ Tested with Hermes desktop v0.21.6 (October 2026). The plugin relies on a few in
 Run the dependency-free regression tests with Node.js:
 
 ```bash
-node --test limits.test.cjs
+node --test limits.test.cjs speed.test.cjs
 ```
 
-These tests use made-up usage data and a minimal stand-in for the app to check polling, window selection, the used/left switch, labels, hover text and colours. They don't replace checking it in the app.
+These tests use made-up usage data and a minimal stand-in for the app to check polling, window selection, the used/left switch, labels, hover text, colours, the session-average blocks, the live and last-stretch speed, and subagent tracking. They don't replace checking it in the app.
 
 ## Credits
 

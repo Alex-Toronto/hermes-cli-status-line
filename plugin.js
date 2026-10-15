@@ -128,19 +128,33 @@ const $infoTick = atom(0)
 
 // Live output rate. Streamed text (answer + visible reasoning) arrives as
 // message.delta / reasoning.delta events; tokens are estimated at 4 chars each
-// (the same rough ratio Hermes uses), over a sliding window.
-const LIVE_WINDOW_MS = 3000
+// (the same rough ratio Hermes uses), over a sliding window. A "stretch" is a
+// run of deltas with no gap over BURST_GAP_MS; the last finished stretch's rate
+// is shown (dimmed) once streaming stops.
+const LIVE_WINDOW_MS = 5000
+const BURST_GAP_MS = 2000
 const liveSamples = new Map() // runtime session id → [{ t, chars }]
+const bursts = new Map() // runtime session id → { start, end, chars }
+
+function recordDeltaAt(sid, chars, now) {
+  const list = liveSamples.get(sid) || []
+  list.push({ t: now, chars })
+  while (list.length && now - list[0].t > LIVE_WINDOW_MS) list.shift()
+  liveSamples.set(sid, list)
+  const b = bursts.get(sid)
+  if (b && now - b.end <= BURST_GAP_MS) {
+    b.end = now
+    b.chars += chars
+  } else {
+    bursts.set(sid, { start: now, end: now, chars })
+  }
+}
 
 function recordDelta(event) {
   const sid = event?.session_id
   const text = event?.payload?.text
   if (!sid || typeof text !== 'string' || !text) return
-  const now = Date.now()
-  const list = liveSamples.get(sid) || []
-  list.push({ t: now, chars: text.length })
-  while (list.length && now - list[0].t > LIVE_WINDOW_MS) list.shift()
-  liveSamples.set(sid, list)
+  recordDeltaAt(sid, text.length, Date.now())
 }
 
 // null = nothing streamed in the window (idle / waiting on a tool or the model).
@@ -153,17 +167,149 @@ function liveRate(sid, now) {
   return chars / 4 / (span / 1000)
 }
 
+// The most recent stretch of streamed text: rate, size, age. Null if none.
+function lastBurst(sid, now) {
+  const b = sid && bursts.get(sid)
+  if (!b) return null
+  const span = Math.max(1000, b.end - b.start)
+  return { rate: b.chars / 4 / (span / 1000), tokens: Math.round(b.chars / 4), seconds: span / 1000, ago: (now - b.end) / 1000 }
+}
+
 function useLiveRate(sid) {
   const busy = useValue(host.state.busy)
-  const [rate, setRate] = useState(null)
+  const [state, setState] = useState({ rate: null, last: null })
   useEffect(() => {
-    const tick = () => setRate(liveRate(sid, Date.now()))
+    const tick = () => {
+      const now = Date.now()
+      setState({ rate: liveRate(sid, now), last: lastBurst(sid, now) })
+    }
     tick()
-    if (!busy) return
-    const t = setInterval(tick, 500)
+    const t = setInterval(tick, busy ? 500 : 5000)
     return () => clearInterval(t)
   }, [sid, busy])
-  return { rate: busy ? rate : null, busy }
+  return { ...state, busy }
+}
+
+// ── session average speed ──────────────────────────────────────────────────
+// Hermes only exposes avg_tps / avg_latency_s over its last ≤10 model calls
+// (agent._api_latency_history, deque maxlen 10). Every time 10 NEW calls have
+// passed, that window holds only calls not yet counted, so it is saved as a
+// closed block; the session average combines the closed blocks (plus the live
+// window while it does not overlap them). Blocks persist per stored session.
+
+function windowOf(u) {
+  const calls = Number(u?.calls || 0)
+  const tps = Number(u?.avg_tps)
+  const lat = Number(u?.avg_latency_s)
+  if (!calls || !(tps > 0) || !(lat > 0)) return null
+  const n = Math.min(calls, 10)
+  const seconds = lat * n
+  return { calls, n, start: calls - n + 1, seconds, out: tps * seconds }
+}
+
+// state: { blocks: [{ n, out, seconds }], closedEnd, base } ; base offsets a counter reset.
+function sessionAvgStep(state, u) {
+  const w = windowOf(u)
+  if (!w) return state
+  let s = state ? { ...state, blocks: [...state.blocks] } : null
+  if (!s) {
+    // First sighting: earlier calls (before this window) are unknown.
+    s = { blocks: [], closedEnd: w.start - 1, base: 0 }
+  } else if (w.calls < s.closedEnd) {
+    // Counter went backwards (agent rebuilt on resume): start a new segment.
+    s.closedEnd = w.start - 1
+  }
+  if (w.calls - s.closedEnd >= 10) {
+    s.blocks.push({ n: w.n, out: w.out, seconds: w.seconds })
+    s.closedEnd = w.calls
+    if (s.blocks.length > 500) s.blocks.splice(0, s.blocks.length - 500)
+  }
+  return s
+}
+
+function sessionAvgValue(state, u) {
+  const w = windowOf(u)
+  let out = 0, seconds = 0, calls = 0
+  for (const b of state?.blocks || []) { out += b.out; seconds += b.seconds; calls += b.n }
+  // The live window counts too while it covers only calls not in a block.
+  if (w && state && w.start > state.closedEnd && w.calls > state.closedEnd) {
+    out += w.out; seconds += w.seconds; calls += w.n
+  }
+  if (!(seconds > 0)) return null
+  return { tps: out / seconds, calls, total: w ? w.calls : calls, seconds }
+}
+
+const $sessionAvg = atom({}) // stored session id → state
+let saveSessionAvg = () => {}
+
+function useSessionAvg(storedId, usage) {
+  const all = useValue($sessionAvg)
+  useEffect(() => {
+    if (!storedId || !usage) return
+    const cur = $sessionAvg.get()
+    const next = sessionAvgStep(cur[storedId], usage)
+    if (next !== cur[storedId]) {
+      const map = { ...cur, [storedId]: { ...next, t: Date.now() } }
+      const ids = Object.keys(map)
+      if (ids.length > 50) {
+        ids.sort((a, b) => (map[a].t || 0) - (map[b].t || 0)).slice(0, ids.length - 50).forEach(id => delete map[id])
+      }
+      $sessionAvg.set(map)
+      saveSessionAvg(map)
+    }
+  }, [storedId, usage])
+  return storedId ? sessionAvgValue(all[storedId], usage) : null
+}
+
+// ── subagents ──────────────────────────────────────────────────────────────
+// subagent.start / subagent.complete arrive on the PARENT chat's session id.
+// Hermes reports a subagent's tokens only when it finishes (output_tokens,
+// duration_seconds = whole run incl. tool time), and does not relay its text.
+const SUBAGENT_STALE_MS = 3600_000
+const SUBAGENT_LINGER_MS = 300_000
+const $subagents = atom({}) // parent sid → { running: { key: {...} }, done: [...] }
+
+function subagentKey(p) {
+  return String(p.subagent_id || p.child_session_id || `${p.delegation_id || ''}#${p.task_index ?? ''}`)
+}
+
+function subagentEvent(type, event, now = Date.now()) {
+  const sid = event?.session_id
+  const p = event?.payload || {}
+  if (!sid) return
+  const all = { ...$subagents.get() }
+  const cur = all[sid] || { running: {}, done: [] }
+  const entry = { running: { ...cur.running }, done: [...cur.done] }
+  const key = subagentKey(p)
+  if (type === 'subagent.start') {
+    entry.running[key] = { goal: String(p.goal || p.text || ''), model: String(p.model || ''), started: now }
+  } else if (type === 'subagent.complete') {
+    const r = entry.running[key]
+    delete entry.running[key]
+    entry.done.unshift({
+      goal: String(p.goal || r?.goal || p.summary || ''),
+      model: String(p.model || r?.model || ''),
+      status: String(p.status || ''),
+      out: Number(p.output_tokens || 0),
+      seconds: Number(p.duration_seconds || (r ? (now - r.started) / 1000 : 0)),
+      calls: Number(p.api_calls || 0),
+      ended: now
+    })
+    entry.done = entry.done.slice(0, 5)
+  } else {
+    return
+  }
+  all[sid] = entry
+  $subagents.set(all)
+}
+
+function subagentView(sid, now) {
+  const e = sid && $subagents.get()[sid]
+  if (!e) return null
+  const running = Object.values(e.running).filter(r => now - r.started < SUBAGENT_STALE_MS)
+  const recent = e.done.filter(d => now - d.ended < SUBAGENT_LINGER_MS)
+  if (!running.length && !recent.length) return null
+  return { running, done: e.done }
 }
 
 // The focused chat's real model/provider. host.state.model is only the app-wide
@@ -416,6 +562,8 @@ function StatusLine() {
   const limits = useAccountLimits()
   const limitMode = useValue($limitMode)
   const procs = useBackgroundProcesses(runtimeId, visible)
+  const sessionAvg = useSessionAvg(storedId, usage)
+  useValue($subagents)
   const now = useNow(5_000)
   const cols = useColumns(ref, visible)
 
@@ -491,29 +639,47 @@ function StatusLine() {
         }
       })
     }
-    if (wide && typeof u.avg_tps === 'number' && u.avg_tps > 0) {
+    if (wide && sessionAvg) {
+      const missing = Math.max(0, sessionAvg.total - sessionAvg.calls)
+      const last10 = typeof u.avg_tps === 'number' && u.avg_tps > 0 ? `${u.avg_tps.toFixed(1)} tokens/second` : '—'
       segs.push({
-        parts: [part('dim', `↑ ${Math.round(u.avg_tps)} t/s`)],
+        parts: [part('dim', `↑ ${Math.round(sessionAvg.tps)} t/s`)],
         card: {
-          title: 'Output speed',
-          rows: [['Speed', `${u.avg_tps.toFixed(1)} tokens/second`]],
-          note: 'Rolling average over the last ~10 model calls.'
+          title: 'Average output speed (session)',
+          rows: [
+            ['Session', `${sessionAvg.tps.toFixed(1)} tokens/second`],
+            ['Covers', `${n(sessionAvg.calls)} of ${n(sessionAvg.total)} model calls`],
+            ['Last 10 calls', last10]
+          ],
+          note: `Output tokens divided by the time the model spent answering, across this session. Hermes only keeps timing for its last 10 calls, so the plugin saves it in blocks of 10 and updates every 10 calls.${missing ? ` ${n(missing)} earlier calls happened before the plugin could record them and aren't included.` : ''}`
         }
       })
     }
     if (wide) {
       const r = liveTps.rate
+      const last = liveTps.last
+      let parts
+      let rows
+      if (r != null) {
+        parts = [part('dim', '⚡ '), part('strong', `~${Math.round(r)}`, true), part('dim', ' t/s')]
+        rows = [['Now', `~${r.toFixed(1)} tokens/second`], ['Window', 'last 5 seconds']]
+      } else if (last) {
+        parts = [part('dim', `⚡ ~${Math.round(last.rate)} t/s last`)]
+        rows = [
+          ['Last stretch', `~${last.rate.toFixed(1)} tokens/second`],
+          ['Size', `~${n(last.tokens)} tokens over ${last.seconds.toFixed(1)} s`],
+          ['Ended', `${durationCompact(last.ago)} ago`]
+        ]
+      } else {
+        parts = [part('dim', '⚡ – t/s')]
+        rows = [['Now', liveTps.busy ? 'not streaming text at this moment' : 'idle']]
+      }
       segs.push({
-        parts: r != null
-          ? [part('dim', '⚡ '), part('strong', `~${Math.round(r)}`, true), part('dim', ' t/s')]
-          : [part('dim', '⚡ – t/s')],
+        parts,
         card: {
           title: 'Output speed right now',
-          rows: [
-            ['Now', r != null ? `~${r.toFixed(1)} tokens/second` : liveTps.busy ? 'not streaming text at this moment' : 'idle'],
-            ['Window', 'last 3 seconds']
-          ],
-          note: 'Live rate of text streaming into this chat (answer plus visible reasoning), estimated at ~4 characters per token. Shows – while idle, or while the model is running tools or writing tool calls, which are not streamed.'
+          rows,
+          note: 'Rate of text streaming into this chat (answer plus visible reasoning), estimated at ~4 characters per token. When streaming stops, the last stretch stays shown, dimmed. Tool calls and reading files or images aren\'t streamed, so they don\'t move this number.'
         }
       })
     }
@@ -537,6 +703,25 @@ function StatusLine() {
             String(p.command || p.session_id || '').replace(/\s+/g, ' ').slice(0, 60)
           ]),
           note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. They use no AI tokens. Checked every 15 s.`
+        }
+      })
+    }
+    const subs = subagentView(runtimeId, now)
+    if (subs) {
+      const speed = d => (d.seconds > 0 && d.out > 0 ? `${(d.out / d.seconds).toFixed(1)} t/s` : '—')
+      const short = s => (s || 'subagent').replace(/\s+/g, ' ').slice(0, 40)
+      segs.push({
+        parts: [part(subs.running.length ? 'strong' : 'dim', `⛓ ${subs.running.length}`, Boolean(subs.running.length))],
+        card: {
+          title: 'Subagents',
+          rows: [
+            ...subs.running.map(r => [`running ${durationCompact((now - r.started) / 1000)}`, short(r.goal)]),
+            ...subs.done.map(d => [
+              `${d.status === 'completed' || !d.status ? 'done' : d.status} · ${speed(d)}`,
+              `${short(d.goal)} (${n(d.out)} tokens, ${durationCompact(d.seconds)})`
+            ])
+          ],
+          note: 'Helpers this chat started. Hermes reports a subagent\'s tokens only when it finishes, so speeds appear afterwards: its output tokens divided by its whole run time, which includes time spent running tools. Shown while any run, and for 5 minutes after.'
         }
       })
     }
@@ -580,6 +765,9 @@ export default {
     $visible.set(ctx.storage.get('visible', true))
     $limitMode.set(ctx.storage.get('limitMode', 'used') === 'left' ? 'left' : 'used')
     saveLimitMode = mode => ctx.storage.set('limitMode', mode)
+    const savedAvg = ctx.storage.get('sessionAvg', {})
+    $sessionAvg.set(savedAvg && typeof savedAvg === 'object' ? savedAvg : {})
+    saveSessionAvg = map => ctx.storage.set('sessionAvg', map)
 
     ctx.register({
       id: 'line',
@@ -593,6 +781,7 @@ export default {
     })
 
     for (const type of ['message.delta', 'reasoning.delta']) ctx.onEvent(type, recordDelta)
+    for (const type of ['subagent.start', 'subagent.complete']) ctx.onEvent(type, e => subagentEvent(type, e))
 
     ctx.register({
       id: 'toggle',
