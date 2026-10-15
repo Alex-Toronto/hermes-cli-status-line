@@ -216,9 +216,8 @@ function pickWindows(row) {
   if (!Array.isArray(windows) || !windows.length) return null
   const acctScoped = windows.filter(w => !w.scope || w.scope === 'account')
   const short =
-    acctScoped.find(w => /session|5\s*h|five|hour/i.test(w.label)) || acctScoped[0] || null
-  const week = acctScoped.find(w => w !== short && /week|7\s*d|seven/i.test(w.label)) ||
-    acctScoped.find(w => w !== short) || null
+    acctScoped.find(w => /session|5\s*h|five|hour/i.test(w.label)) || null
+  const week = acctScoped.find(w => w !== short && /week|7\s*d|seven/i.test(w.label)) || null
   const extras = windows.filter(w => w !== short && w !== week)
   return { short, week, extras }
 }
@@ -227,14 +226,11 @@ function useAccountLimits() {
   const { data } = useQuery({
     queryKey: [ID, 'model-options'],
     queryFn: () => host.request('model.options', {}),
-    staleTime: 10_000,
-    // The first call usually finds the usage cache cold (it warms in the
-    // background), so poll fast until both providers report, then every 2 min.
-    refetchInterval: query => {
-      const rows = query.state.data?.providers ?? []
-      const ready = LIMIT_PROVIDERS.every(p => pickWindows(rows.find(r => r.slug === p.slug)))
-      return ready ? 120_000 : 10_000
-    },
+    staleTime: 120_000,
+    // Missing providers or cold usage caches must never create a fast loop.
+    refetchInterval: 120_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1
   })
   const rows = data?.providers ?? []
@@ -303,30 +299,28 @@ function Segment({ parts, card }) {
 
 function limitParts(l, compact) {
   const out = [part('dim', `${l.label} `)]
-  const pct = w => (w ? Math.round(Number(w.used_percent)) : null)
-  const s = pct(l.short)
-  const w = pct(l.week)
-  if (compact) {
-    out.push(part(pctTone(s), s != null ? `${s}%` : '--', true), part('dim', '/'),
-      part(pctTone(w), w != null ? `${w}%` : '--', true))
-  } else {
-    out.push(part('dim', '5h '), part(pctTone(s), s != null ? `${s}%` : '--', true),
-      part('dim', ' wk '), part(pctTone(w), w != null ? `${w}%` : '--', true))
-  }
+  const windows = [l.short, l.week, ...l.extras].filter(Boolean)
+  windows.forEach((win, i) => {
+    if (i) out.push(part('dim', compact ? ' / ' : ' '))
+    const label = win === l.week ? 'wk' : String(win.label || 'limit')
+    const pct = Number(win.used_percent)
+    const remaining = Math.max(0, Math.min(100, 100 - pct))
+    out.push(part('dim', `${label} `), part(pctTone(pct), `${Math.round(remaining)}% left`, true))
+  })
   return out
 }
 
 function limitCard(l, now) {
   const row = (name, win) =>
-    win ? [name, `${Number(win.used_percent).toFixed(0)}% used · ${untilLabel(win.resets_at, now) || 'reset time unknown'}`] : null
+    win ? [name, `${Math.max(0, Math.min(100, 100 - Number(win.used_percent))).toFixed(0)}% remaining · ${untilLabel(win.resets_at, now) || 'reset time unknown'}`] : null
   return {
     title: `${l.name} subscription limits`,
     rows: [
-      row('5-hour', l.short),
-      row('Weekly', l.week),
+      row(l.short?.label || 'Short window', l.short),
+      row(l.week?.label || 'Weekly', l.week),
       ...l.extras.map(e => row(e.label, e))
     ].filter(Boolean),
-    note: 'How much of your plan\'s rolling allowance is spent. At 100% requests are refused until the window resets. Refreshed every ~2 min.'
+    note: 'How much of your plan\'s rolling allowance remains. At 0% requests are refused until the window resets. Refreshed every ~2 min.'
   }
 }
 

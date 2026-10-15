@@ -5,7 +5,7 @@ A plugin for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) de
 ![status line](docs/status-line.png)
 
 ```
-☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ 4h 5m │ Σ48.1M │ Claude 5h 14% wk 61% │ GPT 5h 39% wk 36%
+☤ gpt-6.1-sol │ 202K/500K │ [████░░░░░░] 40% │ ◎ 97.0% │ ↑ 15 t/s │ ⚡ ~42 t/s │ 🗜️ 1 │ 4h 5m │ Σ48.1M │ Claude 5h 14% left wk 61% left │ GPT wk 36% left
 ```
 
 Hover over any item for exact numbers and a short explanation.
@@ -21,10 +21,12 @@ Hover over any item for exact numbers and a short explanation.
 | `🗜️ 1` | How many times Hermes has compressed older turns to free up context. |
 | `4h 5m` | Session duration. |
 | `Σ48.1M` | Total tokens for the session (input + output). |
-| `Claude 5h … wk …` | Claude subscription limits: % of the 5-hour and weekly allowances used, with reset times on hover. |
-| `GPT 5h … wk …` | ChatGPT/Codex subscription limits, shown the same way. |
+| `Claude 5h … left wk … left` | Claude subscription allowances remaining, with reset times on hover. Only reported windows appear. |
+| `GPT wk … left` | ChatGPT/Codex subscription allowances remaining. Weekly-only accounts show no five-hour placeholder. |
 
-The limit items appear only for providers you're signed into through a subscription login (OAuth): Anthropic (`anthropic`) and ChatGPT/Codex (`openai-codex`). They update about every 2 minutes.
+The limit items appear only for providers you're signed into through a subscription login (OAuth): Anthropic (`anthropic`) and ChatGPT/Codex (`openai-codex`). They update about every 2 minutes, including when a provider is absent or its usage cache is cold. Window focus and reconnect do not trigger extra subscription-query refreshes. A cold cache may therefore take until the next poll to appear.
+
+Subscription percentages show **remaining** allowance; warning colours become more severe as that allowance runs out. Context fullness and cache-hit percentages keep their original meaning. Unknown window labels are preserved instead of being guessed as five-hour or weekly limits. The screenshot above predates this remaining-allowance display.
 
 The line shortens to fit the width of the chat box. Below 76 characters it uses `·` separators and only the context percentage. Below 52 characters it shows just the model and session time. These are the same cut-offs the terminal status bar uses.
 
@@ -65,6 +67,16 @@ It sends nothing anywhere and stores only its on/off setting.
 ## Compatibility
 
 Tested with Hermes desktop v0.21.6 (October 2026). The plugin relies on a few internal parts of the app, including the text of `session.status` and the shape of `model.options`. If a future Hermes update changes those, the affected item goes blank while the rest of the line keeps working.
+
+## Tests
+
+Run the dependency-free regression tests with Node.js:
+
+```bash
+node --test limits.test.cjs
+```
+
+These tests use synthetic usage fixtures and a minimal SDK stub to exercise polling options, window selection, allowance formatting, hover text, and warning colours. They do not replace an in-app rendering check.
 
 ## Licence
 
