@@ -8,7 +8,7 @@ function load(){
   const ctx={atom:v=>({get:()=>v,set:x=>{v=x}}),useQuery:()=>({data:{}}),useValue:a=>a.get(),host:{},setInterval,clearInterval,Date,
     COMPOSER_AREAS:{underside:'composer.underside'},PALETTE_AREA:'palette',jsx:()=>null,jsxs:()=>null}
   vm.createContext(ctx)
-  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,plugin};',ctx)
+  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,startTimeRefetchInterval,plugin};',ctx)
   return ctx.api
 }
 
@@ -87,4 +87,12 @@ test('split view: the line shows only under the focused pane',()=>{
   assert.equal(f('session-tile:B','B',['B']),true)
   // outside any known chat surface: unchanged behaviour
   assert.equal(f('','A',['B']),true)
+})
+test('chat start time: read once; an unlisted chat is re-asked at most 3 more times, then never',()=>{
+  const {startTimeRefetchInterval:f}=load()
+  assert.equal(f({dataUpdateCount:1},true),false)          // found: never again
+  let asks=1
+  for(let n=1;n<100;n++){ if(f({dataUpdateCount:n},false)===false) break; asks++ }
+  assert.equal(asks,4)
+  assert.match(raw,/include_hidden: true/)                // bot chats are listed too
 })

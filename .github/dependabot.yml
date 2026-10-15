@@ -1,0 +1,12 @@
+# Keeps the pinned GitHub Actions in .github/workflows up to date: Dependabot
+# opens a pull request (with the new commit SHA) when an action releases an
+# update, and the tests run on it before anything can merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci

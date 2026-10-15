@@ -273,16 +273,26 @@ function useSessionModel(runtimeId) {
   return { model: m[1], provider: /unknown/i.test(m[2]) ? '' : m[2] }
 }
 
+// A chat's start time never changes: read once per chat. A brand-new chat may
+// not be listed yet, so re-ask every 30 s — at most START_TIME_MAX_TRIES times,
+// then give up (the duration item just stays hidden). include_hidden covers
+// bot chats, which the normal session list leaves out.
+const START_TIME_MAX_TRIES = 4
+
+function startTimeRefetchInterval(state, found) {
+  if (found) return false
+  return Number(state?.dataUpdateCount || 0) < START_TIME_MAX_TRIES ? 30_000 : false
+}
+
 function useSessionStartedAt(storedId) {
   const matches = s => s.id === storedId || s.resolved_id === storedId || s._lineage_root_id === storedId
-  // A chat's start time never changes: read once per chat, re-asking only
-  // (every 30 s) while a brand-new chat hasn't reached the list yet.
   const { data } = useQuery({
     queryKey: [ID, 'session-start', storedId],
-    queryFn: () => host.request('session.list', { limit: 100 }),
+    queryFn: () => host.request('session.list', { limit: 100, include_hidden: true }),
     staleTime: Infinity,
-    refetchInterval: q => ((q.state.data?.sessions ?? []).some(matches) ? false : 30_000),
+    refetchInterval: q => startTimeRefetchInterval(q.state, (q.state.data?.sessions ?? []).some(matches)),
     refetchOnWindowFocus: false,
+    retry: false,
     enabled: Boolean(storedId)
   })
   const row = (data?.sessions ?? []).find(matches)
