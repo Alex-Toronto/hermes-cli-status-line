@@ -55,14 +55,14 @@ The line shortens to fit the width of the chat box. Below 76 characters it uses 
 
 ## Install
 
-Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.0.0` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
+Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.1.0` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
 
 ```bash
 # macOS / Linux
-git clone --branch v1.0.0 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
+git clone --branch v1.1.0 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
 
 # Windows (PowerShell)
-git clone --branch v1.0.0 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
+git clone --branch v1.1.0 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
 ```
 
 If you use a named Hermes profile, put it under that profile's folder instead: `<hermes home>/profiles/<name>/desktop-plugins/`.
