@@ -17,8 +17,7 @@ Hover over any item for exact numbers and a short explanation.
 | Item | Meaning |
 |---|---|
 | `☤ model` | The model answering in this chat. Each chat shows its own model. |
-| `202K/500K` | Context used out of the model's context window. `~` means it's an estimate. |
-| `[████░░░░░░] 40%` | How full the context is. Green below 50%, amber from 50%, red above 80%, bright red at 95%. |
+| `202K/500K │ [████░░░░░░] 40%` | Context window: tokens used out of the model's window, and how full it is. Green below 50%, amber from 50%, red above 80%, bright red at 95%. `~` means it's an estimate. **Click to cycle** numbers and meter → meter only → numbers only. |
 | `◎ 97.0%` | Prompt-cache hit rate: how much of the input the provider re-used from its cache. |
 | `↑ 15 t/s` | Average output speed over the last 10 model calls: output tokens ÷ time the model spent answering. Hermes keeps timing for only those 10 calls. |
 | `⚡ ~42 t/s` | Output speed right now: text streaming into the chat over the last 5 seconds (estimated at ~4 characters per token). When streaming stops, the last stretch stays shown, dimmed (`⚡ ~40 t/s last`). Tool calls and reading files or images aren't streamed, so they don't move it. |
@@ -51,18 +50,18 @@ The hover card always shows both numbers. Model-specific allowances (such as Cla
 
 The line shortens to fit the width of the chat box. Below 76 characters it uses `·` separators and only the context percentage. Below 52 characters it shows just the model and session time. These are the same cut-offs the terminal status bar uses.
 
-**Split view:** Hermes gives plugins numbers only for the chat you're focused on, so with several chats side by side the line shows only under the focused one. Click a chat to move it there.
+**Split view:** Hermes gives plugins numbers only for the chat you're focused on, so with several chats side by side the line shows only under the focused one, starting with that chat's name (`▸ Sivilla Lead │ …`). Click a chat to move the line there.
 
 ## Install
 
-Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.1.1` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
+Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.2.0` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
 
 ```bash
 # macOS / Linux
-git clone --branch v1.1.1 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
+git clone --branch v1.2.0 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
 
 # Windows (PowerShell)
-git clone --branch v1.1.1 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
+git clone --branch v1.2.0 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
 ```
 
 If you use a named Hermes profile, put it under that profile's folder instead: `<hermes home>/profiles/<name>/desktop-plugins/`.
@@ -76,7 +75,7 @@ To update to a newer release, read its release notes, then in that folder run `g
 - **Show or hide:** Ctrl/⌘+K → **Toggle CLI status line** (the desktop equivalent of `/statusbar`).
 - **Turn it off completely:** Settings → Plugins.
 
-Because nothing is saved, the line is shown and the limits are in the "used" view each time the app starts.
+Because nothing is saved, each time the app starts the line is shown, the context item shows numbers and meter, and limits are in the "used" view.
 
 ## How it works
 

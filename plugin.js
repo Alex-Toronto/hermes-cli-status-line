@@ -18,6 +18,7 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'cli-status-line'
+const VERSION = '1.2.0'
 
 // ── formatters (ported 1:1 from the CLI) ───────────────────────────────────
 
@@ -284,11 +285,13 @@ function startTimeRefetchInterval(state, found) {
   return Number(state?.dataUpdateCount || 0) < START_TIME_MAX_TRIES ? 30_000 : false
 }
 
-function useSessionStartedAt(storedId) {
+function useSessionStartedAt(storedId, profile) {
   const matches = s => s.id === storedId || s.resolved_id === storedId || s._lineage_root_id === storedId
+  // Bot chats of other profiles live in that profile's store (opened read-only by Hermes).
+  const params = { limit: 100, include_hidden: true, ...(profile ? { profile } : {}) }
   const { data } = useQuery({
-    queryKey: [ID, 'session-start', storedId],
-    queryFn: () => host.request('session.list', { limit: 100, include_hidden: true }),
+    queryKey: [ID, 'session-start', storedId, profile || ''],
+    queryFn: () => host.request('session.list', params),
     staleTime: Infinity,
     refetchInterval: q => startTimeRefetchInterval(q.state, (q.state.data?.sessions ?? []).some(matches)),
     refetchOnWindowFocus: false,
@@ -297,7 +300,7 @@ function useSessionStartedAt(storedId) {
   })
   const row = (data?.sessions ?? []).find(matches)
   const started = Number(row?.started_at || 0)
-  return started > 1e12 ? started / 1000 : started
+  return { startedAt: started > 1e12 ? started / 1000 : started, title: cleanName(row?.title) }
 }
 
 // Account limits. model.options attaches cached usage windows to every signed-in
@@ -438,16 +441,78 @@ function surfaceIsFocused(anchor, focusedStoredId, tileIds) {
   return !tileIds.includes(focusedStoredId) // main pane: focused unless an extra pane is
 }
 
-function useFocusedSurface(ref, focusedStoredId) {
-  const [focused, setFocused] = useState(true)
+// The name on this pane's tab, as the user sees it (bot chats show the bot's
+// name there, not the stored chat title). Read from the pane's own tab:
+// [data-pane-host=<id>] ↔ [data-tree-tab=<id>]; screen-reader-only text,
+// buttons and decorative parts are skipped. '' when it can't be found.
+function paneTabName(surface) {
+  const host = surface?.closest('[data-pane-host]')
+  const paneId = host?.getAttribute('data-pane-host')
+  const groupId = host?.getAttribute('data-tree-group')
+  const tabs = [...document.querySelectorAll('[data-tree-tab]')]
+  // This pane's own tab; else the selected tab of its group's strip.
+  const tab = (paneId && tabs.find(el => el.getAttribute('data-tree-tab') === paneId)) ||
+    (groupId && [...document.querySelectorAll('[data-zone-tabstrip]')]
+      .find(el => el.getAttribute('data-zone-tabstrip') === groupId)
+      ?.querySelector('[data-tree-tab][aria-selected="true"]'))
+  if (!tab) return ''
+  const copy = tab.cloneNode(true)
+  copy.querySelectorAll('.sr-only, button, [aria-hidden="true"], svg, kbd').forEach(el => el.remove())
+  return cleanName(copy.textContent)
+}
+
+function cleanName(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
+// Several chats visible side by side. Background tabs stay in the page but are
+// made inert and invisible, so they don't count.
+function chatIsShown(el) {
+  if (el.closest('[inert], [aria-hidden="true"]')) return false
+  const r = el.getBoundingClientRect()
+  return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'
+}
+
+function countVisibleChats() {
+  return [...document.querySelectorAll('[data-chat-surface]')].filter(chatIsShown).length
+}
+
+function useFocusedSurface(ref, focusedStoredId, tick) {
+  const [state, setState] = useState({ focused: true, split: false, tabName: '' })
   useEffect(() => {
     const surface = ref.current?.closest('[data-session-anchor]')
     const anchor = surface?.getAttribute('data-session-anchor') || ''
     const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
       .map(el => el.getAttribute('data-session-anchor').slice('session-tile:'.length))
-    setFocused(surfaceIsFocused(anchor, focusedStoredId, tileIds))
-  }, [ref, focusedStoredId])
-  return focused
+    const focused = surfaceIsFocused(anchor, focusedStoredId, tileIds)
+    const split = countVisibleChats() > 1
+    const tabName = focused && split ? paneTabName(surface) : ''
+    setState(prev => (prev.focused === focused && prev.split === split && prev.tabName === tabName ? prev : { focused, split, tabName }))
+  }, [ref, focusedStoredId, tick])
+  return state
+}
+
+// ── context item: click cycles three views ─────────────────────────────────
+// 1 'numbers'  202K/500K
+// 2 'both'     202K/500K │ [████░░░░░░] 40%   (default — the terminal's layout)
+// 3 'bar'      [████░░░░░░]
+const CTX_MODES = ['both', 'bar', 'numbers'] // click order, starting from the default
+const $ctxMode = atom('both')
+function cycleCtxMode() {
+  const i = CTX_MODES.indexOf($ctxMode.get())
+  $ctxMode.set(CTX_MODES[(i + 1) % CTX_MODES.length])
+}
+
+// Parts for the merged context item. Medium width keeps the terminal's short
+// form (percent only) for 'both'.
+function contextParts(mode, wide, c) {
+  const tone = pctTone(c.pct)
+  const pctLabel = c.pct != null ? `${c.mark}${c.pct}%` : '--'
+  const numbers = c.ctxMax ? `${c.mark}${tokensCompact(c.ctxUsed)}/${contextLength(c.ctxMax)}` : 'ctx --'
+  if (mode === 'numbers') return [part('dim', numbers)]
+  if (mode === 'bar') return [part(tone, contextBar(c.pct))]
+  if (!wide) return [part(tone, pctLabel, true)]
+  return [part('dim', numbers), part('dim', ' │ '), part(tone, contextBar(c.pct)), part('dim', ' '), part(tone, pctLabel, true)]
 }
 
 // Available width in terminal columns (monospace cell ≈ 0.6em).
@@ -582,18 +647,20 @@ function StatusLine() {
   const provider = live.provider
   const usage = useValue(host.state.focusedUsage)
   const storedId = useValue(host.state.focusedStoredSessionId)
-  const startedAt = useSessionStartedAt(storedId)
+  const sessionProfile = useValue(host.state.focusedSessionProfile)
+  const { startedAt, title: storedTitle } = useSessionStartedAt(storedId, sessionProfile)
   const limits = useAccountLimits()
   const limitMode = useValue($limitMode)
+  const ctxMode = useValue($ctxMode)
   const procs = useBackgroundProcesses(runtimeId, visible)
   const now = useNow(5_000)
   const subs = useSubagents(runtimeId, now)
   const cols = useColumns(ref, visible)
-  const surfaceFocused = useFocusedSurface(ref, storedId)
+  const surface = useFocusedSurface(ref, storedId, now)
 
   if (!visible) return null
   // Unfocused split pane: keep an invisible marker so focus changes are seen.
-  if (!surfaceFocused) return jsx('span', { ref, 'aria-hidden': true, style: { display: 'none' } })
+  if (!surface.focused) return jsx('span', { ref, 'aria-hidden': true, style: { display: 'none' } })
 
   const narrow = cols < 52
   const wide = cols >= 76
@@ -609,6 +676,19 @@ function StatusLine() {
   const duration = elapsed != null ? durationCompact(elapsed) : ''
 
   const segs = []
+  // Split view: name the chat the line belongs to (the name on its tab).
+  if (surface.split) {
+    const name = surface.tabName || storedTitle || 'This chat'
+    const shortName = name.length > 24 ? `${name.slice(0, 23)}…` : name
+    segs.push({
+      parts: [part('dim', '▸ '), part('strong', shortName, true)],
+      card: {
+        title: 'Active chat',
+        rows: [['Chat', name], storedTitle && storedTitle !== name ? ['Title', storedTitle] : null].filter(Boolean),
+        note: 'Several chats are open side by side. The line shows the one you\'re focused on; click another chat to switch.'
+      }
+    })
+  }
   segs.push({
     parts: [part('dim', '☤ '), part('strong', modelShort(model), true)],
     card: {
@@ -632,27 +712,21 @@ function StatusLine() {
   if (narrow) {
     if (durationSeg) segs.push(durationSeg)
   } else {
-    if (wide) {
-      segs.push({
-        parts: [part('dim', ctxMax ? `${mark}${tokensCompact(ctxUsed)}/${contextLength(ctxMax)}` : 'ctx --')],
-        card: {
-          title: 'Context window',
-          rows: ctxMax
-            ? [['Used', `${n(ctxUsed)} tokens`], ['Window', `${n(ctxMax)} tokens`], ['Free', `${n(Math.max(0, ctxMax - ctxUsed))} tokens`],
-               ['Source', est ? 'local estimate (~)' : 'provider-reported']]
-            : [],
-          note: 'How much of the model\'s working memory this conversation fills right now: rules, tools, skills and the chat so far.'
-        }
-      })
-    }
-    const tone = pctTone(pct)
     const pctLabel = pct != null ? `${mark}${pct}%` : '--'
+    const nextView = { both: 'meter only', bar: 'numbers only', numbers: 'numbers and meter' }[ctxMode]
     segs.push({
-      parts: wide ? [part(tone, contextBar(pct)), part('dim', ' '), part(tone, pctLabel, true)] : [part(tone, pctLabel, true)],
+      parts: contextParts(ctxMode, wide, { pct, mark, ctxUsed, ctxMax }),
+      onClick: cycleCtxMode,
       card: {
-        title: 'Context fullness',
-        rows: [['Full', pctLabel], ['Colour', 'green <50% · amber 50–80% · red >80% · bright red ≥95%']],
-        note: 'When it gets high Hermes compresses older turns into a summary so the chat can keep going; very full contexts are slower and costlier.'
+        title: 'Context window',
+        rows: [
+          ...(ctxMax
+            ? [['Used', `${n(ctxUsed)} tokens (${pctLabel})`], ['Window', `${n(ctxMax)} tokens`], ['Free', `${n(Math.max(0, ctxMax - ctxUsed))} tokens`],
+               ['Source', est ? 'local estimate (~)' : 'provider-reported']]
+            : [['Used', 'not reported yet']]),
+          ['Colour', 'green <50% · amber 50–80% · red >80% · bright red ≥95%']
+        ],
+        note: `How much of the model's working memory this chat fills: rules, tools, skills and the conversation so far. When it gets high, Hermes compresses older turns into a summary so the chat can keep going. Click to show ${nextView}.`
       }
     })
     if (typeof u.cache_hit_pct === 'number' && Number.isFinite(u.cache_hit_pct)) {
@@ -788,12 +862,14 @@ function StatusLine() {
 export default {
   id: ID,
   name: 'CLI Status Line',
+  version: VERSION,
   register(ctx) {
     // Nothing is saved: settings reset to defaults when the app starts. Remove
     // anything earlier versions of this plugin saved.
     for (const key of LEGACY_STORAGE_KEYS) ctx.storage.remove(key)
     $visible.set(true)
     $limitMode.set('used')
+    $ctxMode.set('both')
 
     ctx.register({
       id: 'line',

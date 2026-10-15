@@ -8,7 +8,7 @@ function load(){
   const ctx={atom:v=>({get:()=>v,set:x=>{v=x}}),useQuery:()=>({data:{}}),useValue:a=>a.get(),host:{},setInterval,clearInterval,Date,
     COMPOSER_AREAS:{underside:'composer.underside'},PALETTE_AREA:'palette',jsx:()=>null,jsxs:()=>null}
   vm.createContext(ctx)
-  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,startTimeRefetchInterval,plugin};',ctx)
+  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,startTimeRefetchInterval,contextParts,cycleCtxMode,$ctxMode,cleanName,plugin};',ctx)
   return ctx.api
 }
 
@@ -95,4 +95,24 @@ test('chat start time: read once; an unlisted chat is re-asked at most 3 more ti
   for(let n=1;n<100;n++){ if(f({dataUpdateCount:n},false)===false) break; asks++ }
   assert.equal(asks,4)
   assert.match(raw,/include_hidden: true/)                // bot chats are listed too
+})
+test('context item: click cycles numbers+meter → meter → numbers → back; one merged item',()=>{
+  const {contextParts:p,cycleCtxMode,$ctxMode}=load()
+  const t=parts=>parts.map(x=>x.text).join('')
+  const c={pct:40,mark:'',ctxUsed:202000,ctxMax:500000}
+  assert.equal($ctxMode.get(),'both')
+  assert.equal(t(p('both',true,c)),'202K/500K │ [████░░░░░░] 40%')
+  assert.equal(t(p('bar',true,c)),'[████░░░░░░]')
+  assert.equal(t(p('numbers',true,c)),'202K/500K')
+  assert.equal(t(p('both',false,c)),'40%')                       // medium width keeps the short form
+  const seen=[];for(let i=0;i<4;i++){seen.push($ctxMode.get());cycleCtxMode()}
+  assert.equal(seen.join(','),'both,bar,numbers,both')
+  assert.equal(t(p('numbers',true,{pct:null,mark:'',ctxUsed:0,ctxMax:0})),'ctx --')
+  assert.equal(p('bar',true,{...c,pct:96})[0].tone,'critical')    // the bar keeps its warning colours
+})
+test('chat names are cleaned and capped',()=>{
+  const {cleanName:c}=load()
+  assert.equal(c('  Sivilla\n  Lead '),'Sivilla Lead')
+  assert.equal(c(undefined),'')
+  assert.equal(c('x'.repeat(200)).length,80)
 })
