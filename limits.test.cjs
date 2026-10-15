@@ -13,7 +13,7 @@ function load(){
 const text=parts=>parts.map(p=>p.text).join('')
 const weeklyRow={slug:'openai-codex',usage:{windows:[{label:'Weekly',used_percent:12}]}}
 
-test('subscription polling is a fixed 2 minutes, never a fast loop, no focus/reconnect refetch',()=>{
+test('subscription polling is a fixed 5 minutes, never a fast loop, no focus/reconnect refetch',()=>{
   const x=load();x.api.useAccountLimits()
   const opt=x.options()
   const at=(providers,count)=>opt.refetchInterval({state:{data:{providers},dataUpdateCount:count}})
