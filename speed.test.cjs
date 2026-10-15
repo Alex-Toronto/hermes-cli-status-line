@@ -8,7 +8,7 @@ function load(){
   const ctx={atom:v=>({get:()=>v,set:x=>{v=x}}),useQuery:()=>({data:{}}),useValue:a=>a.get(),host:{},setInterval,clearInterval,Date,
     COMPOSER_AREAS:{underside:'composer.underside'},PALETTE_AREA:'palette',jsx:()=>null,jsxs:()=>null}
   vm.createContext(ctx)
-  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,plugin};',ctx)
+  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,plugin};',ctx)
   return ctx.api
 }
 
@@ -75,4 +75,16 @@ test('secrets are hidden in displayed commands and goals',()=>{
     ['python -m http.server 8000','python -m http.server 8000']
   ]
   for(const [input,expected] of cases) assert.equal(r(input),expected,input)
+})
+test('split view: the line shows only under the focused pane',()=>{
+  const {surfaceIsFocused:f}=load()
+  // single pane
+  assert.equal(f('workspace','A',[]),true)
+  // main pane A + extra pane B
+  assert.equal(f('workspace','A',['B']),true)
+  assert.equal(f('session-tile:B','A',['B']),false)
+  assert.equal(f('workspace','B',['B']),false)
+  assert.equal(f('session-tile:B','B',['B']),true)
+  // outside any known chat surface: unchanged behaviour
+  assert.equal(f('','A',['B']),true)
 })

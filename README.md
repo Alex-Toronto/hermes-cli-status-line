@@ -1,5 +1,7 @@
 # Hermes CLI Status Line
 
+[![tests](https://github.com/Alex-Toronto/hermes-cli-status-line/actions/workflows/tests.yml/badge.svg)](https://github.com/Alex-Toronto/hermes-cli-status-line/actions/workflows/tests.yml)
+
 A plugin for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop app. It adds a one-line live readout under the chat box, laid out like the status bar in Hermes's terminal version:
 
 ![status line](docs/status-line.png)
@@ -27,8 +29,18 @@ Hover over any item for exact numbers and a short explanation.
 | `Σ48.1M` | Total tokens for the session (input + output). |
 | `Claude 5h … wk …` | Claude subscription limits: % of the 5-hour and weekly allowances used, with reset times on hover. Only reported windows appear. |
 | `GPT wk …` | ChatGPT/Codex subscription limits, shown the same way. Weekly-only accounts show no five-hour placeholder. |
+| `OpenRouter quota …` and others | Any other signed-in provider whose limits Hermes can read, shown the same way. |
 
-The limit items appear only for providers you're signed into through a subscription login (OAuth): Anthropic (`anthropic`) and ChatGPT/Codex (`openai-codex`). They update every 2 minutes. If the first check after the app opens finds no data yet, one extra check runs 20 seconds later; there are no faster checks.
+A limit item appears for every signed-in provider that Hermes can read limits for. With Hermes v0.22.0 that is:
+
+- **Claude** (`anthropic`, subscription login) — 5-hour and weekly allowances; Opus/Sonnet-only weeks in the hover card.
+- **GPT** (`openai-codex`, ChatGPT login) — 5-hour and weekly allowances.
+- **OpenRouter** (`openrouter`) — the API key's spending limit, only if the key has one set.
+- **Zen** (`opencode-zen`) and any provider plugin that reports usage to Hermes.
+
+Providers Hermes can't read limits for (plain API keys for Anthropic, OpenAI, Gemini and most others) don't appear. Nous Portal credits aren't shown: Hermes reports them through a live account request on every check, which this plugin avoids.
+
+The limits are checked every 5 minutes, from data Hermes already keeps; Hermes itself decides when to ask each provider, at most every 2 minutes per provider. If the first check after the app opens finds nothing, one extra check runs 20 seconds later. There are no faster checks and no retry loops, and switching windows or reconnecting doesn't add any.
 
 **Click either limit item to switch between % used and % left.** The two views use different colours:
 
@@ -38,6 +50,8 @@ The limit items appear only for providers you're signed into through a subscript
 The hover card always shows both numbers. Model-specific allowances (such as Claude's Opus-only week) appear in the hover card only.
 
 The line shortens to fit the width of the chat box. Below 76 characters it uses `·` separators and only the context percentage. Below 52 characters it shows just the model and session time. These are the same cut-offs the terminal status bar uses.
+
+**Split view:** Hermes gives plugins numbers only for the chat you're focused on, so with several chats side by side the line shows only under the focused one. Click a chat to move it there.
 
 ## Install
 
@@ -82,7 +96,7 @@ The live speed and finished-subagent figures are held in memory only (capped at 
 
 ## Privacy and security
 
-- **Saves nothing.** The plugin writes no files and no app storage. On load it deletes anything earlier versions saved.
+- **Saves nothing.** The plugin writes no files and no app storage. Versions before v1.0.0 saved three small settings; on load the plugin removes those leftovers if they exist (on a fresh install there is nothing to remove).
 - **No network access of its own.** It makes no web requests and loads no code. The limit numbers come from Hermes, which checks your providers' account-status endpoints itself.
 - **Read-only.** It only asks Hermes for information and never changes chats, settings or processes.
 - **Safe display.** All text is shown as plain text, so a model reply or subagent goal can't inject anything into the app. Anything in background-command lines or subagent goals that looks like a key, token or password is hidden as `••••`. This is a best-effort pattern match, not a guarantee, so avoid typing secrets into commands.
@@ -91,7 +105,18 @@ See [SECURITY.md](SECURITY.md) for how to report a problem.
 
 ## Compatibility
 
-Tested with Hermes desktop v0.22.0 (October 2026). The plugin relies on a few internal parts of the app, including the text of `session.status` and the shape of `model.options`. If a future Hermes update changes those, the affected item goes blank while the rest of the line keeps working.
+Built and tested on **Hermes Agent v0.22.0** (`v0.22.0+167.ge8c8e46`, October 2026) with the desktop app on Windows 11.
+
+The plugin relies on a few internal parts of the app: the text of `session.status`, the shape of `model.options`, `process.list` and `subagent.list`, the chat panes' `data-session-anchor` attribute, and the streamed-text events. A Hermes update can change any of these. If one changes, only the matching item goes blank or wrong while the rest of the line keeps working. **After updating Hermes, glance at the line**, and report anything that looks off.
+
+### Not yet tested
+
+- **Light theme.** All colours come from the app's theme except the amber warning colour, which is a fixed amber blended toward the theme's text colour. It is expected to read well on light themes but hasn't been checked.
+- **macOS and Linux.** Only Windows 11 has been tested. The emoji fallback fonts listed cover all three systems.
+- **Other Hermes versions** than v0.22.0.
+- **Providers other than Claude and ChatGPT** on a real account: OpenRouter key limits, Zen and plugin providers are covered by the tests with made-up data only.
+- **Remote gateways** (the desktop app connected to Hermes on another machine) and **multiple accounts for one provider** (the first account that reports limits is shown).
+- **Screen readers.** The limit items can be clicked and used with the keyboard, but the line hasn't been checked with assistive software.
 
 ## Tests
 
@@ -102,6 +127,8 @@ node --test limits.test.cjs speed.test.cjs
 ```
 
 They use made-up data and a minimal stand-in for the app to check polling, window selection, the used/left switch, labels, colours, the live and last-stretch speed, subagent tracking, the memory caps, secret hiding, and that the plugin saves nothing and makes no network requests of its own. They don't replace checking it in the app.
+
+They run automatically on GitHub for every pull request and every change to `main`.
 
 ## Credits
 

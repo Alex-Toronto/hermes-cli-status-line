@@ -290,13 +290,21 @@ function useSessionStartedAt(storedId) {
   return started > 1e12 ? started / 1000 : started
 }
 
-// Subscription windows. model.options attaches cached usage per provider row
-// (agent/account_usage_cache) and kicks a background refresh, so polling it
-// never blocks on the usage APIs; the numbers trail by at most one poll.
-const LIMIT_PROVIDERS = [
-  { slug: 'anthropic', label: 'Claude' },
-  { slug: 'openai-codex', label: 'GPT' }
-]
+// Account limits. model.options attaches cached usage windows to every signed-in
+// provider row that can report them (Hermes's built-in fetchers — Anthropic
+// OAuth, OpenAI Codex, OpenRouter key quota — plus any provider plugin with a
+// usage hook), and asks Hermes for a background refresh that Hermes itself
+// throttles per provider. Polling it never waits on a provider API.
+// Every provider that reports windows is shown; these get short names.
+const PROVIDER_LABELS = { anthropic: 'Claude', 'openai-codex': 'GPT', openrouter: 'OpenRouter', 'opencode-zen': 'Zen' }
+const PROVIDER_ORDER = ['anthropic', 'openai-codex']
+const LIMITS_POLL_MS = 300_000
+const LIMITS_FIRST_RECHECK_MS = 20_000
+
+function providerLabel(row) {
+  const slug = String(row?.slug || '')
+  return PROVIDER_LABELS[slug] || String(row?.name || slug || 'Provider').slice(0, 14)
+}
 
 function pickWindows(row) {
   const usage = row?.usage
@@ -309,7 +317,7 @@ function pickWindows(row) {
   if (!Array.isArray(windows) || !windows.length) return null
   const acctScoped = windows.filter(w => !w.scope || w.scope === 'account')
   const short =
-    acctScoped.find(w => /session|5\s*h|five|hour/i.test(w.label)) || null
+    acctScoped.find(w => /session|5\s*h|five|hourly|\bhour/i.test(w.label)) || null
   const week = acctScoped.find(w => w !== short && /week|7\s*d|seven/i.test(w.label)) || null
   const extras = windows.filter(w => w !== short && w !== week)
   return { short, week, extras }
@@ -319,28 +327,37 @@ function useAccountLimits() {
   const { data } = useQuery({
     queryKey: [ID, 'model-options'],
     queryFn: () => host.request('model.options', {}),
-    staleTime: 120_000,
+    staleTime: LIMITS_POLL_MS,
     // Missing providers or cold usage caches must never create a fast loop:
-    // a fixed 2-minute poll, plus ONE early re-check 20 s after an empty first
+    // a fixed 5-minute poll, plus ONE early re-check 20 s after an empty first
     // answer (the usage cache warms in the background after that first call).
     refetchInterval: limitsRefetchInterval,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1
   })
-  const rows = data?.providers ?? []
-  return LIMIT_PROVIDERS.map(p => {
-    const row = rows.find(r => r.slug === p.slug)
-    const picked = pickWindows(row)
-    return picked ? { ...p, ...picked, name: row?.name || p.label } : null
-  }).filter(Boolean)
+  return limitsFromRows(data?.providers ?? [])
+}
+
+function limitsFromRows(rows) {
+  const rank = slug => {
+    const i = PROVIDER_ORDER.indexOf(slug)
+    return i === -1 ? PROVIDER_ORDER.length : i
+  }
+  return rows
+    .filter(r => r && r.slug && r.authenticated !== false)
+    .map(r => {
+      const picked = pickWindows(r)
+      return picked ? { slug: r.slug, label: providerLabel(r), name: String(r.name || providerLabel(r)), ...picked } : null
+    })
+    .filter(Boolean)
+    .sort((a, b) => rank(a.slug) - rank(b.slug) || a.label.localeCompare(b.label))
 }
 
 function limitsRefetchInterval(query) {
   const state = query?.state ?? {}
-  const rows = state.data?.providers ?? []
-  const anyReported = LIMIT_PROVIDERS.some(p => pickWindows(rows.find(r => r.slug === p.slug)))
-  return state.dataUpdateCount === 1 && !anyReported ? 20_000 : 120_000
+  const anyReported = limitsFromRows(state.data?.providers ?? []).length > 0
+  return state.dataUpdateCount === 1 && !anyReported ? LIMITS_FIRST_RECHECK_MS : LIMITS_POLL_MS
 }
 
 const $limitMode = atom('used') // 'used' | 'left'
@@ -399,6 +416,28 @@ function useNow(intervalMs) {
     return () => clearInterval(t)
   }, [intervalMs])
   return now
+}
+
+// Split view: Hermes gives plugins numbers only for the FOCUSED chat, so the
+// line shows only under the focused pane — never one chat's numbers under
+// another chat. Each pane's root carries data-session-anchor: 'workspace' for
+// the main pane, 'session-tile:<stored id>' for extra panes.
+function surfaceIsFocused(anchor, focusedStoredId, tileIds) {
+  if (!anchor) return true // not inside a known chat surface: behave as before
+  if (anchor.startsWith('session-tile:')) return anchor.slice('session-tile:'.length) === focusedStoredId
+  return !tileIds.includes(focusedStoredId) // main pane: focused unless an extra pane is
+}
+
+function useFocusedSurface(ref, focusedStoredId) {
+  const [focused, setFocused] = useState(true)
+  useEffect(() => {
+    const surface = ref.current?.closest('[data-session-anchor]')
+    const anchor = surface?.getAttribute('data-session-anchor') || ''
+    const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
+      .map(el => el.getAttribute('data-session-anchor').slice('session-tile:'.length))
+    setFocused(surfaceIsFocused(anchor, focusedStoredId, tileIds))
+  }, [ref, focusedStoredId])
+  return focused
 }
 
 // Available width in terminal columns (monospace cell ≈ 0.6em).
@@ -483,7 +522,11 @@ function lineWindows(l) {
 function windowLabel(l, win) {
   if (win === l.short) return '5h'
   if (win === l.week) return 'wk'
-  return String(win.label || 'limit')
+  const label = String(win.label || 'limit')
+  if (/quota/i.test(label)) return 'quota'
+  if (/month/i.test(label)) return 'mo'
+  if (/day|daily/i.test(label)) return 'day'
+  return label.slice(0, 12)
 }
 
 function limitParts(l, compact, mode = 'used') {
@@ -512,7 +555,7 @@ function limitCard(l, now, mode = 'used') {
       row('Weekly', l.week),
       ...l.extras.map(e => row(e.label, e))
     ].filter(Boolean),
-    note: `Your plan's rolling allowances. When one is fully used, requests are refused until it resets. Refreshed every ~2 min. Click to show ${mode === 'left' ? '% used' : '% left'}.`
+    note: `Your plan's rolling allowances. When one is fully used, requests are refused until it resets. Refreshed about every 5 min. Click to show ${mode === 'left' ? '% used' : '% left'}.`
   }
 }
 
@@ -536,8 +579,11 @@ function StatusLine() {
   const now = useNow(5_000)
   const subs = useSubagents(runtimeId, now)
   const cols = useColumns(ref, visible)
+  const surfaceFocused = useFocusedSurface(ref, storedId)
 
   if (!visible) return null
+  // Unfocused split pane: keep an invisible marker so focus changes are seen.
+  if (!surfaceFocused) return jsx('span', { ref, 'aria-hidden': true, style: { display: 'none' } })
 
   const narrow = cols < 52
   const wide = cols >= 76
@@ -724,7 +770,7 @@ function StatusLine() {
   return jsx('div', {
     ref,
     className: 'flex w-full min-w-0 items-center overflow-hidden px-2 text-[0.6875rem] leading-5 whitespace-pre select-none',
-    style: { fontFamily: 'var(--dt-font-mono, ui-monospace, monospace)' },
+    style: { fontFamily: "var(--dt-font-mono, ui-monospace, monospace), 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji'" },
     children
   })
 }

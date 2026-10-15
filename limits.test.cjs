@@ -7,7 +7,7 @@ function load(){
   let options
   const ctx={atom:v=>({get:()=>v,set:x=>{v=x}}),useQuery:o=>{options=o;return {data:{providers:[]}}},host:{},setInterval,clearInterval}
   vm.createContext(ctx)
-  vm.runInContext(source+'\nthis.api={useAccountLimits,pickWindows,limitParts,limitCard,limitsRefetchInterval,toggleLimitMode,$limitMode};',ctx)
+  vm.runInContext(source+'\nthis.api={useAccountLimits,pickWindows,limitParts,limitCard,limitsRefetchInterval,limitsFromRows,toggleLimitMode,$limitMode};',ctx)
   return {api:ctx.api,options:()=>options}
 }
 const text=parts=>parts.map(p=>p.text).join('')
@@ -17,16 +17,16 @@ test('subscription polling is a fixed 2 minutes, never a fast loop, no focus/rec
   const x=load();x.api.useAccountLimits()
   const opt=x.options()
   const at=(providers,count)=>opt.refetchInterval({state:{data:{providers},dataUpdateCount:count}})
-  assert.equal(at([weeklyRow],1),120000)
-  for(const count of [2,3,10]) assert.equal(at([],count),120000)
+  assert.equal(at([weeklyRow],1),300000)
+  for(const count of [2,3,10]) assert.equal(at([],count),300000)
   assert.equal(opt.refetchOnWindowFocus,false)
   assert.equal(opt.refetchOnReconnect,false)
-  assert.equal(opt.staleTime,120000)
+  assert.equal(opt.staleTime,300000)
 })
 test('an empty first answer gets exactly one early re-check',()=>{
   const {api}=load()
   assert.equal(api.limitsRefetchInterval({state:{data:{providers:[]},dataUpdateCount:1}}),20000)
-  assert.equal(api.limitsRefetchInterval({state:{data:{providers:[]},dataUpdateCount:2}}),120000)
+  assert.equal(api.limitsRefetchInterval({state:{data:{providers:[]},dataUpdateCount:2}}),300000)
 })
 test('weekly-only usage is never classified or displayed as a five-hour limit',()=>{
   const {api}=load()
@@ -67,8 +67,8 @@ test('unknown window labels are preserved rather than guessed',()=>{
   const {api}=load()
   const picked=api.pickWindows({usage:{windows:[{label:'Monthly',used_percent:11}]}})
   assert.equal(picked.short,null);assert.equal(picked.week,null)
-  assert.equal(text(api.limitParts({...picked,label:'GPT'},false)),'GPT Monthly 11%')
-  assert.equal(text(api.limitParts({...picked,label:'GPT'},false,'left')),'GPT Monthly 89% left')
+  assert.equal(text(api.limitParts({...picked,label:'GPT'},false)),'GPT mo 11%')
+  assert.equal(text(api.limitParts({...picked,label:'GPT'},false,'left')),'GPT mo 89% left')
 })
 test('missing usage is omitted',()=>{
   const {api}=load()
@@ -108,4 +108,38 @@ test('clicking flips used <-> left, and the hover says what a click does',()=>{
   api.toggleLimitMode();assert.equal(api.$limitMode.get(),'left')
   assert.match(api.limitCard(l,Date.now(),'left').note,/Click to show % used/)
   api.toggleLimitMode();assert.equal(api.$limitMode.get(),'used')
+})
+test('every signed-in provider that reports limits is shown; Claude and GPT first',()=>{
+  const {api}=load()
+  const w=(label,p)=>({label,used_percent:p,scope:'account'})
+  const rows=[
+    {slug:'openrouter',name:'OpenRouter',usage:{windows:[w('API key quota',40)]}},
+    {slug:'opencode-zen',name:'OpenCode Zen',usage:{windows:[w('Weekly',5)]}},
+    {slug:'openai-codex',name:'OpenAI Codex',usage:{windows:[w('Session',10),w('Weekly',20)]}},
+    {slug:'anthropic',name:'Anthropic',usage:{accounts:[{windows:[w('Current session',30),w('Current week',60)]}]}},
+    {slug:'some-plugin',name:'Some Plugin Provider Name',usage:{windows:[w('Monthly',50)]}},
+    {slug:'nousresearch',name:'Nous',usage:null},
+    {slug:'gemini',name:'Gemini',authenticated:false,usage:{windows:[w('Weekly',1)]}}
+  ]
+  const l=api.limitsFromRows(rows)
+  assert.equal(l.map(x=>x.label).join(','),'Claude,GPT,OpenRouter,Some Plugin Pr,Zen')
+  const text=x=>api.limitParts(x,false).map(p=>p.text).join('')
+  assert.equal(text(l[0]),'Claude 5h 30% wk 60%')
+  assert.equal(text(l[2]),'OpenRouter quota 40%')
+  assert.equal(text(l[3]),'Some Plugin Pr mo 50%')
+})
+test('no polling loop: over 24 h of any provider state, at most one check is faster than 5 minutes',()=>{
+  const {api}=load()
+  for(const providers of [[],[{slug:'anthropic',usage:null}],[{slug:'openrouter',usage:{windows:[{label:'API key quota',used_percent:1}]}}]]){
+    let t=0,count=0,fast=0
+    while(t<24*3600*1000){
+      count++
+      const iv=api.limitsRefetchInterval({state:{data:{providers},dataUpdateCount:count}})
+      if(iv<300000) fast++
+      assert.ok(iv>=20000)
+      t+=iv
+    }
+    assert.ok(fast<=1,`fast checks: ${fast}`)
+    assert.ok(count<=289,`checks per day: ${count}`)
+  }
 })
