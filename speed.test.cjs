@@ -8,19 +8,20 @@ function load(){
   const ctx={atom:v=>({get:()=>v,set:x=>{v=x}}),useQuery:()=>({data:{}}),useValue:a=>a.get(),host:{},setInterval,clearInterval,Date,
     COMPOSER_AREAS:{underside:'composer.underside'},PALETTE_AREA:'palette',jsx:()=>null,jsxs:()=>null}
   vm.createContext(ctx)
-  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,startTimeRefetchInterval,contextParts,cycleCtxMode,$ctxMode,cleanName,plugin};',ctx)
+  vm.runInContext(source+'\nthis.api={recordDeltaAt,liveRate,lastBurst,bursts,subagentEvent,subagentView,$subagentDone,redactSecrets,surfaceIsFocused,startTimeRefetchInterval,contextParts,cycleCtxMode,$ctxMode,cleanName,rememberModel,$models,plugin};',ctx)
   return ctx.api
 }
 
-test('nothing is saved: no storage writes anywhere, and old saved data is removed on load',()=>{
+test('nothing is saved: no storage writes anywhere; old saved data is removed only if present',()=>{
   assert.doesNotMatch(raw,/storage\.set\(/)
   assert.doesNotMatch(raw,/localStorage|sessionStorage|indexedDB|document\.cookie/)
   const api=load()
   const removed=[]
-  const ctx={storage:{remove:k=>removed.push(k),get:()=>{throw new Error('must not read')},set:()=>{throw new Error('must not write')}},
+  const old={limitMode:'left'}
+  const ctx={storage:{remove:k=>removed.push(k),get:(k,f)=>(k in old?old[k]:f),set:()=>{throw new Error('must not write')}},
     register:()=>{},onEvent:()=>{}}
   api.plugin.register(ctx)
-  assert.equal(removed.join(','),'visible,limitMode,sessionAvg')
+  assert.equal(removed.join(','),'limitMode')   // a fresh install touches nothing
 })
 test('no network or code-loading of its own; only read-only Hermes requests',()=>{
   assert.doesNotMatch(raw,/\bfetch\(|XMLHttpRequest|WebSocket|EventSource|\beval\(|new Function|import\(|innerHTML|dangerouslySetInnerHTML/)
@@ -115,4 +116,41 @@ test('chat names are cleaned and capped',()=>{
   assert.equal(c('  Sivilla\n  Lead '),'Sivilla Lead')
   assert.equal(c(undefined),'')
   assert.equal(c('x'.repeat(200)).length,80)
+})
+
+test('more secret formats are hidden; quotes and normal flags survive',()=>{
+  const {redactSecrets:r}=load()
+  const k=(a,b)=>a+b // built at runtime so the test file itself holds no token-shaped strings
+  const cases=[
+    ['curl -H "Authorization: token '+k('abcd','ef123456')+'" x','curl -H "Authorization: token ••••" x'],
+    ['curl -u alex:'+k('hun','ter22')+' https://x','curl -u alex:•••• https://x'],
+    ['mysql -p'+k('Sec','ret99')+' db','mysql -p•••• db'],
+    ['STRIPE='+k('sk_live_','abcdefghijklmnop'),'STRIPE=••••'],
+    ['key '+k('AIza','SyA1234567890abcdefghijklmnopqrstu'),'key ••••'],
+    ['x '+k('hf_','abcdefghijklmnopqrst')+' y','x •••• y'],
+    ['x '+k('glpat-','abcdefghijklmnopqrst'),'x ••••'],
+    ['-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----','••••'],
+    ['python -m pytest -p no:cacheprovider','python -m pytest -p no:cacheprovider'],
+    ['git log -p','git log -p']
+  ]
+  for(const [input,expected] of cases) assert.equal(r(input),expected,input.slice(0,12))
+})
+test('finished subagents disappear from the card after 5 minutes',()=>{
+  const {subagentView:v}=load()
+  const now=1_000_000
+  const done=[{goal:'old',ended:now-6*60_000},{goal:'new',ended:now-60_000}]
+  assert.equal(v([{status:'running'}],done,now).done.map(d=>d.goal).join(','),'new')
+  assert.equal(v([],[done[0]],now),null)
+})
+test('model comes from Hermes events, capped at 20 chats, no repeat asks',()=>{
+  const x=load()
+  for(let i=0;i<25;i++) x.rememberModel({session_id:'s'+i,payload:{model:'m'+i,provider:'p'}})
+  const all=x.$models.get()
+  assert.equal(Object.keys(all).length,20)
+  assert.equal(all.s24.model,'m24'); assert.equal(all.s0,undefined)
+  x.rememberModel({session_id:'s24',payload:{model:'m24',provider:'p'}})
+  assert.equal(x.$models.get(),all)                 // unchanged → no re-render
+  x.rememberModel({session_id:'s9',payload:{}})      // no model → ignored
+  assert.match(raw,/staleTime: Infinity/)
+  assert.doesNotMatch(raw,/infoTick/)
 })

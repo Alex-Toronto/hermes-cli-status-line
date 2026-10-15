@@ -5,7 +5,7 @@
  *
  * Same segments, order, formatting and colour thresholds as the CLI
  * (hermes_cli/cli_status_bar_mixin.py), plus subscription-limit segments for
- * Claude (anthropic OAuth) and ChatGPT (openai-codex). Every segment has its own
+ * every signed-in provider that reports limits. Every segment has its own
  * hover card with the exact numbers and what they mean. Width tiers follow the
  * CLI's column thresholds (<52 narrow, <76 medium, else wide), measured on the
  * strip itself. Follows the focused chat tile.
@@ -13,12 +13,12 @@
  * Toggle: Ctrl+K → "Toggle CLI status line" (the desktop twin of /statusbar).
  */
 
-import { atom, COMPOSER_AREAS, host, PALETTE_AREA, Tip, useQuery, useValue } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { atom, COMPOSER_AREAS, host, PALETTE_AREA, Tip, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'cli-status-line'
-const VERSION = '1.2.0'
+const VERSION = '1.2.1'
 
 // ── formatters (ported 1:1 from the CLI) ───────────────────────────────────
 
@@ -124,8 +124,25 @@ const part = (tone, text, bold = false) => ({ tone, text, bold })
 // ── state ──────────────────────────────────────────────────────────────────
 
 const $visible = atom(true)
-// Bumped by session.info events (model switches) so the per-chat model refetches.
-const $infoTick = atom(0)
+// Model/provider per chat, taken from the session.info events Hermes already
+// sends (every turn and on model switches). Capped at MAX_TRACKED_CHATS; in
+// memory only. session.status is asked only for a chat with no event yet.
+const $models = atom({})
+function rememberModel(event) {
+  const sid = event?.session_id
+  const p = event?.payload || {}
+  const model = typeof p.model === 'string' ? p.model.trim() : ''
+  if (!sid || !model) return
+  const provider = typeof p.provider === 'string' ? p.provider.trim() : ''
+  const prev = $models.get()
+  if (prev[sid]?.model === model && prev[sid]?.provider === provider) return
+  const next = { ...prev }
+  delete next[sid]
+  next[sid] = { model, provider }
+  const keys = Object.keys(next)
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_TRACKED_CHATS))) delete next[k]
+  $models.set(next)
+}
 
 // Live output rate. Streamed text (answer + visible reasoning) arrives as
 // message.delta / reasoning.delta events; tokens are estimated at 4 chars each
@@ -182,18 +199,27 @@ function lastBurst(sid, now) {
   return { rate: b.chars / 4 / (span / 1000), tokens: Math.round(b.chars / 4), seconds: span / 1000, ago: (now - b.end) / 1000 }
 }
 
-function useLiveRate(sid) {
+function sameBurst(a, b) {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  return typeof a === 'number' ? a === b : a.tokens === b.tokens && a.seconds === b.seconds && Math.round(a.ago) === Math.round(b.ago)
+}
+
+function useLiveRate(sid, active) {
   const busy = useValue(host.state.busy)
   const [state, setState] = useState({ rate: null, last: null })
   useEffect(() => {
+    if (!active) return // hidden copies of the line do no work
     const tick = () => {
       const now = Date.now()
-      setState({ rate: liveRate(sid, now), last: lastBurst(sid, now) })
+      const rate = liveRate(sid, now)
+      const last = lastBurst(sid, now)
+      setState(prev => (sameBurst(prev.rate, rate) && sameBurst(prev.last, last) ? prev : { rate, last }))
     }
     tick()
     const t = setInterval(tick, busy ? 500 : 5000)
     return () => clearInterval(t)
-  }, [sid, busy])
+  }, [sid, busy, active])
   return { ...state, busy }
 }
 
@@ -206,12 +232,12 @@ function useLiveRate(sid) {
 const SUBAGENT_LINGER_MS = 300_000
 const MAX_TRACKED_CHATS = 20
 const $subagentDone = atom({}) // parent sid → [{ goal, status, out, seconds, ended }] (≤5)
-const $subagentTick = atom(0) // bumped by subagent events so the running list refetches at once
+const $subagentEvent = atom({ sid: '', n: 0 }) // last subagent event, so that chat's list refreshes at once
 
 function subagentEvent(type, event, now = Date.now()) {
   const sid = event?.session_id
   if (!sid) return
-  $subagentTick.set($subagentTick.get() + 1)
+  $subagentEvent.set({ sid, n: $subagentEvent.get().n + 1 })
   if (type !== 'subagent.complete') return
   const p = event?.payload || {}
   const all = { ...$subagentDone.get() }
@@ -230,13 +256,17 @@ function subagentEvent(type, event, now = Date.now()) {
   $subagentDone.set(all)
 }
 
-function useSubagents(runtimeId, now) {
-  const tick = useValue($subagentTick)
+function useSubagents(runtimeId, now, ready = true) {
+  const ev = useValue($subagentEvent)
   const doneAll = useValue($subagentDone)
+  const qc = useQueryClient()
+  useEffect(() => {
+    if (ready && runtimeId && ev.sid === runtimeId) qc.invalidateQueries({ queryKey: [ID, 'subagents', runtimeId] })
+  }, [ev, runtimeId, ready, qc])
   const { data } = useQuery({
-    queryKey: [ID, 'subagents', runtimeId, tick],
+    queryKey: [ID, 'subagents', runtimeId],
     queryFn: () => host.request('subagent.list', { session_id: runtimeId }),
-    enabled: Boolean(runtimeId),
+    enabled: Boolean(runtimeId) && ready,
     staleTime: 15_000,
     // Poll only while something runs; start/complete events trigger a fresh read anyway.
     refetchInterval: q => ((q.state.data?.subagents ?? []).some(s => !s.status || s.status === 'running') ? 20_000 : false),
@@ -250,25 +280,63 @@ function subagentView(list, done, now) {
   const running = list.filter(s => !s.status || s.status === 'running')
   const recent = done.filter(d => now - d.ended < SUBAGENT_LINGER_MS)
   if (!running.length && !recent.length) return null
-  return { running, done }
+  return { running, done: recent }
+}
+
+// ── load in steps after a tab switch ───────────────────────────────────────
+// Defer session-detail queries across two frames and an idle callback, then
+// enable model → start time → jobs/subagents 250 ms apart. This staggers query
+// eligibility, not RPC completion; it cannot detect when a whole chat is loaded.
+const LOAD_STEPS = 3
+const LOAD_STEP_MS = 250
+
+function useLoadStage(key, active) {
+  const [load, setLoad] = useState({ key: '', stage: 0 })
+  useEffect(() => {
+    setLoad({ key, stage: 0 })
+    if (!active || !key) return
+    let cancelled = false
+    let timer = 0
+    let idle = 0
+    let frame = 0
+    const step = n => {
+      if (cancelled) return
+      setLoad({ key, stage: n })
+      if (n < LOAD_STEPS) timer = setTimeout(() => step(n + 1), LOAD_STEP_MS)
+    }
+    const ric = window.requestIdleCallback
+      ? cb => window.requestIdleCallback(cb, { timeout: 1500 })
+      : cb => setTimeout(cb, 200)
+    const cic = window.cancelIdleCallback
+      ? id => window.cancelIdleCallback(id)
+      : clearTimeout
+    frame = requestAnimationFrame(() => {
+      if (cancelled) return
+      frame = requestAnimationFrame(() => {
+        if (!cancelled) idle = ric(() => step(1))
+      })
+    })
+    return () => { cancelled = true; cancelAnimationFrame(frame); cic(idle); clearTimeout(timer) }
+  }, [key, active])
+  // A switch must disable queries during render, before the reset effect runs.
+  return active && load.key === key ? load.stage : 0
 }
 
 // The focused chat's real model/provider. host.state.model is only the app-wide
 // default, so ask the gateway for this session's status (same "Model: x (provider)"
 // line /status prints).
-function useSessionModel(runtimeId) {
-  const tick = useValue($infoTick)
+function useSessionModel(runtimeId, ready = true) {
+  const known = useValue($models)[runtimeId]
   const { data } = useQuery({
-    queryKey: [ID, 'session-status', runtimeId, tick],
+    queryKey: [ID, 'session-status', runtimeId],
     queryFn: () => host.request('session.status', { session_id: runtimeId }),
-    enabled: Boolean(runtimeId),
-    // A model switch arrives as a session.info event (bumps tick → refetch);
-    // the slow poll is only a safety net.
-    staleTime: 300_000,
-    refetchInterval: 300_000,
+    // Only for a chat no session.info event has described yet; asked once.
+    enabled: Boolean(runtimeId) && ready && !known,
+    staleTime: Infinity,
     refetchOnWindowFocus: false,
     retry: 1
   })
+  if (known) return known
   const m = /^Model:\s*(.+?)\s*\(([^()]*)\)\s*$/m.exec(String(data?.output || ''))
   if (!m || /unknown/i.test(m[1])) return { model: '', provider: '' }
   return { model: m[1], provider: /unknown/i.test(m[2]) ? '' : m[2] }
@@ -285,7 +353,7 @@ function startTimeRefetchInterval(state, found) {
   return Number(state?.dataUpdateCount || 0) < START_TIME_MAX_TRIES ? 30_000 : false
 }
 
-function useSessionStartedAt(storedId, profile) {
+function useSessionStartedAt(storedId, profile, ready = true) {
   const matches = s => s.id === storedId || s.resolved_id === storedId || s._lineage_root_id === storedId
   // Bot chats of other profiles live in that profile's store (opened read-only by Hermes).
   const params = { limit: 100, include_hidden: true, ...(profile ? { profile } : {}) }
@@ -296,7 +364,7 @@ function useSessionStartedAt(storedId, profile) {
     refetchInterval: q => startTimeRefetchInterval(q.state, (q.state.data?.sessions ?? []).some(matches)),
     refetchOnWindowFocus: false,
     retry: false,
-    enabled: Boolean(storedId)
+    enabled: Boolean(storedId) && ready
   })
   const row = (data?.sessions ?? []).find(matches)
   const started = Number(row?.started_at || 0)
@@ -336,9 +404,10 @@ function pickWindows(row) {
   return { short, week, extras }
 }
 
-function useAccountLimits() {
+function useAccountLimits(ready = true) {
   const { data } = useQuery({
     queryKey: [ID, 'model-options'],
+    enabled: ready,
     queryFn: () => host.request('model.options', {}),
     staleTime: LIMITS_POLL_MS,
     // Missing providers or cold usage caches must never create a fast loop:
@@ -386,11 +455,18 @@ const LEGACY_STORAGE_KEYS = ['visible', 'limitMode', 'sessionAvg']
 // and well-known key shapes (sk-…, ghp_…, gho_…, xoxb-…, AKIA…, JWTs).
 const SECRET_NAME = '(?:[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|AUTH|CREDENTIALS?|COOKIE|SESSION)[A-Za-z0-9_]*)'
 const SECRET_PATTERNS = [
-  new RegExp(`\\b(${SECRET_NAME})(\\s*[=:]\\s*)(?!(?:Bearer|Basic)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
-  new RegExp(`(--?${SECRET_NAME})(\\s+|=)(?!(?:Bearer|Basic)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
+  new RegExp(`\\b(${SECRET_NAME})(\\s*[=:]\\s*)(?!(?:Bearer|Basic|token)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
+  new RegExp(`(--?${SECRET_NAME})(\\s+|=)(?!(?:Bearer|Basic|token)\\s)("[^"]*"|'[^']*'|\\S+)`, 'gi'),
   /\b(Bearer|Basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi,
   /(\/\/[^\s/:@]+:)([^\s@/]+)(@)/g,
-  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}\b/g,
+  /\b(Authorization\s*:\s*(?:token\s+|bearer\s+|basic\s+)?)([^\s"']{6,})/gi,
+  /(\s-u\s+[^\s:"']+:)([^\s"']+)/g,
+  /(\s-p)([^\s"'-][^\s"']{3,})/g,
+  /\b(?:sk|pk|rk)[-_](?:live_|test_)?[A-Za-z0-9_-]{12,}\b/g,
+  /\bAIza[A-Za-z0-9_-]{30,}\b/g,
+  /\b(?:hf|glpat|npm)[-_][A-Za-z0-9_-]{16,}\b/g,
+  /\bxapp-[A-Za-z0-9-]{10,}\b/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{12,}\b/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bA(?:KIA|SIA)[A-Z0-9]{16}\b/g,
@@ -399,35 +475,38 @@ const SECRET_PATTERNS = [
 
 function redactSecrets(text) {
   let s = String(text ?? '')
+  for (const re of SECRET_PATTERNS.slice(4, 7)) s = s.replace(re, (_, k) => `${k}••••`)
   s = s.replace(SECRET_PATTERNS[2], (_, k, sep) => `${k}${sep}••••`)
   s = s.replace(SECRET_PATTERNS[0], (_, k, sep) => `${k}${sep}••••`)
   s = s.replace(SECRET_PATTERNS[1], (_, k, sep) => `${k}${sep}••••`)
   s = s.replace(SECRET_PATTERNS[3], (_, a, __, b) => `${a}••••${b}`)
-  for (const re of SECRET_PATTERNS.slice(4)) s = s.replace(re, '••••')
+  for (const re of SECRET_PATTERNS.slice(7)) s = s.replace(re, '••••')
   return s
 }
 
 // Background terminal processes owned by the focused chat (the same list the
-// app's process stack shows). Local registry read, so a 15 s poll is cheap.
-function useBackgroundProcesses(runtimeId, active) {
+// app's process stack shows). Local registry read, so a 30 s poll is cheap.
+function useBackgroundProcesses(runtimeId, ready) {
   const { data } = useQuery({
     queryKey: [ID, 'processes', runtimeId],
     queryFn: () => host.request('process.list', { session_id: runtimeId }),
-    enabled: Boolean(runtimeId) && active,
+    enabled: Boolean(runtimeId) && ready,
     staleTime: 10_000,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     refetchOnWindowFocus: false,
     retry: false
   })
   return (data?.processes ?? []).filter(p => !p.status || p.status === 'running')
 }
 
-function useNow(intervalMs) {
+function useNow(intervalMs, active = true) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
     const t = setInterval(() => setNow(Date.now()), intervalMs)
     return () => clearInterval(t)
-  }, [intervalMs])
+  }, [intervalMs, active])
   return now
 }
 
@@ -465,30 +544,48 @@ function cleanName(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80)
 }
 
-// Several chats visible side by side. Background tabs stay in the page but are
-// made inert and invisible, so they don't count.
-function chatIsShown(el) {
-  if (el.closest('[inert], [aria-hidden="true"]')) return false
-  const r = el.getBoundingClientRect()
-  return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'
-}
+// Hermes marks every hidden pane (background tabs) with data-pane-hidden.
+// Only that marker is used: no layout reads, and dialogs (which set
+// aria-hidden on the page) never make the line think its tab is hidden.
+const PANE_HIDDEN = '[data-pane-hidden]'
 
 function countVisibleChats() {
-  return [...document.querySelectorAll('[data-chat-surface]')].filter(chatIsShown).length
+  return [...document.querySelectorAll('[data-chat-surface]')].filter(el => !el.closest(PANE_HIDDEN)).length
 }
 
-function useFocusedSurface(ref, focusedStoredId, tick) {
-  const [state, setState] = useState({ focused: true, split: false, tabName: '' })
+function readSurface(el, focusedStoredId) {
+  // Start from the parent: the hidden marker span is our own and must not count.
+  if (!el || el.parentElement?.closest(PANE_HIDDEN)) return { focused: false, split: false, tabName: '' }
+  const surface = el.closest('[data-session-anchor]')
+  const anchor = surface?.getAttribute('data-session-anchor') || ''
+  const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
+    .map(t => t.getAttribute('data-session-anchor').slice('session-tile:'.length))
+  const focused = surfaceIsFocused(anchor, focusedStoredId, tileIds)
+  const split = focused && countVisibleChats() > 1
+  return { focused, split, tabName: split ? paneTabName(surface) : '' }
+}
+
+// Every open tab mounts its own copy of the line; only the visible, focused
+// copy does any work. Checked before the first paint (no flash of another
+// chat's numbers), again whenever Hermes shows or hides a pane, and every 5 s
+// as a safety net.
+function useFocusedSurface(ref, focusedStoredId) {
+  const [state, setState] = useState({ focused: false, split: false, tabName: '' })
+  const apply = next => setState(prev => (prev.focused === next.focused && prev.split === next.split && prev.tabName === next.tabName ? prev : next))
+  useLayoutEffect(() => {
+    apply(readSurface(ref.current, focusedStoredId))
+  }, [ref, focusedStoredId])
   useEffect(() => {
-    const surface = ref.current?.closest('[data-session-anchor]')
-    const anchor = surface?.getAttribute('data-session-anchor') || ''
-    const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
-      .map(el => el.getAttribute('data-session-anchor').slice('session-tile:'.length))
-    const focused = surfaceIsFocused(anchor, focusedStoredId, tileIds)
-    const split = countVisibleChats() > 1
-    const tabName = focused && split ? paneTabName(surface) : ''
-    setState(prev => (prev.focused === focused && prev.split === split && prev.tabName === tabName ? prev : { focused, split, tabName }))
-  }, [ref, focusedStoredId, tick])
+    let frame = 0
+    const check = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => apply(readSurface(ref.current, focusedStoredId)))
+    }
+    const mo = new MutationObserver(check)
+    mo.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['data-pane-hidden', 'data-session-anchor'] })
+    const t = setInterval(check, 5000)
+    return () => { mo.disconnect(); clearInterval(t); cancelAnimationFrame(frame) }
+  }, [ref, focusedStoredId])
   return state
 }
 
@@ -520,7 +617,7 @@ function useColumns(ref, active) {
   const [cols, setCols] = useState(200)
   useEffect(() => {
     const el = ref.current?.parentElement
-    if (!el) return
+    if (!el || !active) return
     const measure = () => {
       const fontPx = parseFloat(getComputedStyle(ref.current || el).fontSize) || 11
       setCols(Math.floor(el.clientWidth / (fontPx * 0.6)))
@@ -641,26 +738,27 @@ function StatusLine() {
   const visible = useValue($visible)
   const defaultModel = useValue(host.state.model)
   const runtimeId = useValue(host.state.focusedSessionId)
-  const live = useSessionModel(runtimeId)
-  const liveTps = useLiveRate(runtimeId)
-  const model = live.model || defaultModel
-  const provider = live.provider
   const usage = useValue(host.state.focusedUsage)
   const storedId = useValue(host.state.focusedStoredSessionId)
   const sessionProfile = useValue(host.state.focusedSessionProfile)
-  const { startedAt, title: storedTitle } = useSessionStartedAt(storedId, sessionProfile)
-  const limits = useAccountLimits()
+  const surface = useFocusedSurface(ref, storedId)
+  const active = visible && surface.focused
+  // Hidden copies (other tabs) never load anything; the shown one loads in steps.
+  const stage = useLoadStage(`${runtimeId}|${storedId}`, active)
+  const live = useSessionModel(runtimeId, stage >= 1)
+  const model = live.model || defaultModel
+  const provider = live.provider
+  const { startedAt, title: storedTitle } = useSessionStartedAt(storedId, sessionProfile, stage >= 2)
+  const procs = useBackgroundProcesses(runtimeId, stage >= 3)
+  const now = useNow(5_000, active)
+  const subs = useSubagents(runtimeId, now, stage >= 3)
+  const liveTps = useLiveRate(runtimeId, active)
+  const limits = useAccountLimits(active && stage >= 3)
   const limitMode = useValue($limitMode)
   const ctxMode = useValue($ctxMode)
-  const procs = useBackgroundProcesses(runtimeId, visible)
-  const now = useNow(5_000)
-  const subs = useSubagents(runtimeId, now)
-  const cols = useColumns(ref, visible)
-  const surface = useFocusedSurface(ref, storedId, now)
+  const cols = useColumns(ref, active)
 
-  if (!visible) return null
-  // Unfocused split pane: keep an invisible marker so focus changes are seen.
-  if (!surface.focused) return jsx('span', { ref, 'aria-hidden': true, style: { display: 'none' } })
+  if (!visible || !surface.focused) return jsx('span', { ref, 'aria-hidden': true, style: { display: 'none' } })
 
   const narrow = cols < 52
   const wide = cols >= 76
@@ -801,7 +899,7 @@ function StatusLine() {
             p.uptime_seconds != null ? durationCompact(Number(p.uptime_seconds)) : '·',
             redactSecrets(String(p.command || p.session_id || '')).replace(/\s+/g, ' ').slice(0, 60)
           ]),
-          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. Anything that looks like a key, token or password is hidden as ••••. They use no AI tokens. Checked every 15 s.`
+          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. Anything that looks like a key, token or password is hidden as ••••. They use no AI tokens. Checked every 30 s.`
         }
       })
     }
@@ -866,7 +964,7 @@ export default {
   register(ctx) {
     // Nothing is saved: settings reset to defaults when the app starts. Remove
     // anything earlier versions of this plugin saved.
-    for (const key of LEGACY_STORAGE_KEYS) ctx.storage.remove(key)
+    for (const key of LEGACY_STORAGE_KEYS) if (ctx.storage.get(key, undefined) !== undefined) ctx.storage.remove(key)
     $visible.set(true)
     $limitMode.set('used')
     $ctxMode.set('both')
@@ -878,9 +976,7 @@ export default {
       render: () => jsx(StatusLine, {})
     })
 
-    ctx.onEvent('session.info', event => {
-      if (event?.payload?.model) $infoTick.set($infoTick.get() + 1)
-    })
+    ctx.onEvent('session.info', rememberModel)
 
     for (const type of ['message.delta', 'reasoning.delta']) ctx.onEvent(type, recordDelta)
     for (const type of ['subagent.start', 'subagent.complete']) ctx.onEvent(type, e => subagentEvent(type, e))

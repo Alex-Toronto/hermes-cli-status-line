@@ -1,22 +1,24 @@
 # Security policy
 
-## Reporting a problem
+## Report privately
 
-Please report security problems privately through GitHub: **Security → Report a vulnerability** on this repository. Don't open a public issue for them.
+Use this repository's **Security → Report a vulnerability** page, not a public issue. Include the plugin release tag, Hermes desktop version and a reproduction without real credentials. A reply will follow as soon as practical.
 
-Include what you saw, the plugin version (release tag) and your Hermes desktop version. You'll get a reply as soon as practical.
+## Scope and limitations
 
-## What this plugin does and doesn't do
-
-- It runs inside the Hermes desktop app and only reads data the app already gives plugins, through read-only requests (`session.status`, `session.list`, `model.options`, `process.list`, `subagent.list`) and events the app already receives.
-- It makes no network requests of its own, loads no code, writes no files and saves nothing in app storage.
-- It shows text as plain text only, never as HTML.
-- It hides anything that looks like a key, token or password in the background-command and subagent text it displays. This is a best-effort pattern match.
+- The plugin runs inside Hermes desktop. It reads focused app state, existing events and read-only RPCs: `session.status`, `session.list`, `model.options`, `process.list`, `subagent.list`.
+- It makes no direct network or model calls, adds nothing to chat context, dynamically loads no code and writes no files. Local Hermes RPCs can cause backend work: `model.options` can trigger background provider usage refreshes. This is not a guarantee of no external activity or negligible runtime cost.
+- There is no new persistent tracking. View choices and bounded model/speed/subagent trackers are in memory. The old test-build keys `visible`, `limitMode`, `sessionAvg` are read for cleanup and removed only if present; a fresh install performs no storage writes.
+- Display values are plain text, not HTML. This is not a sandbox or a blanket security guarantee.
+- Command and subagent-goal previews receive **best-effort pattern redaction**. Patterns can miss secrets or hide legitimate text. Do not put credentials in commands/goals or assume screenshots have been sanitized.
+- Hiding the line disables its queries and active readout timers, but is not disabling the plugin: visibility observers, a 5-second safety check and event subscriptions remain active. Already-started requests may finish. See README for scheduling and verification limits.
 
 ## Supported versions
 
-Only the latest release receives fixes.
+Only the **latest published release** receives fixes. Development-branch changes are not a published security update.
 
-## Changes to this repository
+## Repository protections
 
-All changes reach `main` through a reviewed pull request; direct pushes and force-pushes to `main` are blocked. Outside contributions are reviewed line by line before merging. Install a numbered release rather than `main`.
+Changes to `main` require a pull request and the passing `test` status check; direct and force pushes are blocked by branch protection, including for administrators. Required human approvals are **zero**—PR-only protection does not guarantee independent human review. Install numbered releases rather than `main`.
+
+Tests use fixtures and simulated lifecycle/SDK stand-ins, not actual React/browser integration. Passing tests do not prove complete secret detection or that every fix has been checked on screen.

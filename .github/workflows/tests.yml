@@ -26,4 +26,4 @@ jobs:
       - name: Syntax check
         run: node --input-type=module --check < plugin.js
       - name: Tests
-        run: node --test limits.test.cjs speed.test.cjs
+        run: node --test *.test.cjs
