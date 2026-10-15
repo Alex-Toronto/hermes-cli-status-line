@@ -18,7 +18,7 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'cli-status-line'
-const VERSION = '1.2.0'
+const VERSION = '1.2.1'
 
 // ── formatters (ported 1:1 from the CLI) ───────────────────────────────────
 
@@ -182,10 +182,11 @@ function lastBurst(sid, now) {
   return { rate: b.chars / 4 / (span / 1000), tokens: Math.round(b.chars / 4), seconds: span / 1000, ago: (now - b.end) / 1000 }
 }
 
-function useLiveRate(sid) {
+function useLiveRate(sid, active) {
   const busy = useValue(host.state.busy)
   const [state, setState] = useState({ rate: null, last: null })
   useEffect(() => {
+    if (!active) return // hidden copies of the line do no work
     const tick = () => {
       const now = Date.now()
       setState({ rate: liveRate(sid, now), last: lastBurst(sid, now) })
@@ -193,7 +194,7 @@ function useLiveRate(sid) {
     tick()
     const t = setInterval(tick, busy ? 500 : 5000)
     return () => clearInterval(t)
-  }, [sid, busy])
+  }, [sid, busy, active])
   return { ...state, busy }
 }
 
@@ -415,19 +416,21 @@ function useBackgroundProcesses(runtimeId, active) {
     queryFn: () => host.request('process.list', { session_id: runtimeId }),
     enabled: Boolean(runtimeId) && active,
     staleTime: 10_000,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     refetchOnWindowFocus: false,
     retry: false
   })
   return (data?.processes ?? []).filter(p => !p.status || p.status === 'running')
 }
 
-function useNow(intervalMs) {
+function useNow(intervalMs, active = true) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
     const t = setInterval(() => setNow(Date.now()), intervalMs)
     return () => clearInterval(t)
-  }, [intervalMs])
+  }, [intervalMs, active])
   return now
 }
 
@@ -477,18 +480,37 @@ function countVisibleChats() {
   return [...document.querySelectorAll('[data-chat-surface]')].filter(chatIsShown).length
 }
 
-function useFocusedSurface(ref, focusedStoredId, tick) {
+// Every open tab mounts its own copy of the line. Only the visible, focused
+// copy does any work: the check runs AFTER a tab switch has painted (never in
+// the switch itself), hidden tabs are recognised from attributes alone (no
+// layout reads), and layout is only measured by the one focused copy.
+function useFocusedSurface(ref, focusedStoredId) {
   const [state, setState] = useState({ focused: true, split: false, tabName: '' })
   useEffect(() => {
-    const surface = ref.current?.closest('[data-session-anchor]')
-    const anchor = surface?.getAttribute('data-session-anchor') || ''
-    const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
-      .map(el => el.getAttribute('data-session-anchor').slice('session-tile:'.length))
-    const focused = surfaceIsFocused(anchor, focusedStoredId, tileIds)
-    const split = countVisibleChats() > 1
-    const tabName = focused && split ? paneTabName(surface) : ''
-    setState(prev => (prev.focused === focused && prev.split === split && prev.tabName === tabName ? prev : { focused, split, tabName }))
-  }, [ref, focusedStoredId, tick])
+    let cancelled = false
+    const check = () => {
+      if (cancelled || !ref.current) return
+      const el = ref.current
+      let focused = false
+      let split = false
+      let tabName = ''
+      if (!el.closest('[inert], [aria-hidden="true"]')) {
+        const surface = el.closest('[data-session-anchor]')
+        const anchor = surface?.getAttribute('data-session-anchor') || ''
+        const tileIds = [...document.querySelectorAll('[data-session-anchor^="session-tile:"]')]
+          .map(t => t.getAttribute('data-session-anchor').slice('session-tile:'.length))
+        focused = surfaceIsFocused(anchor, focusedStoredId, tileIds)
+        if (focused) {
+          split = countVisibleChats() > 1
+          tabName = split ? paneTabName(surface) : ''
+        }
+      }
+      setState(prev => (prev.focused === focused && prev.split === split && prev.tabName === tabName ? prev : { focused, split, tabName }))
+    }
+    const first = setTimeout(check, 150)
+    const t = setInterval(check, 5000)
+    return () => { cancelled = true; clearTimeout(first); clearInterval(t) }
+  }, [ref, focusedStoredId])
   return state
 }
 
@@ -642,21 +664,22 @@ function StatusLine() {
   const defaultModel = useValue(host.state.model)
   const runtimeId = useValue(host.state.focusedSessionId)
   const live = useSessionModel(runtimeId)
-  const liveTps = useLiveRate(runtimeId)
   const model = live.model || defaultModel
   const provider = live.provider
   const usage = useValue(host.state.focusedUsage)
   const storedId = useValue(host.state.focusedStoredSessionId)
+  const surface = useFocusedSurface(ref, storedId)
+  const active = visible && surface.focused
+  const liveTps = useLiveRate(runtimeId, active)
   const sessionProfile = useValue(host.state.focusedSessionProfile)
   const { startedAt, title: storedTitle } = useSessionStartedAt(storedId, sessionProfile)
   const limits = useAccountLimits()
   const limitMode = useValue($limitMode)
   const ctxMode = useValue($ctxMode)
-  const procs = useBackgroundProcesses(runtimeId, visible)
-  const now = useNow(5_000)
+  const procs = useBackgroundProcesses(runtimeId, active)
+  const now = useNow(5_000, active)
   const subs = useSubagents(runtimeId, now)
   const cols = useColumns(ref, visible)
-  const surface = useFocusedSurface(ref, storedId, now)
 
   if (!visible) return null
   // Unfocused split pane: keep an invisible marker so focus changes are seen.
@@ -801,7 +824,7 @@ function StatusLine() {
             p.uptime_seconds != null ? durationCompact(Number(p.uptime_seconds)) : '·',
             redactSecrets(String(p.command || p.session_id || '')).replace(/\s+/g, ' ').slice(0, 60)
           ]),
-          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. Anything that looks like a key, token or password is hidden as ••••. They use no AI tokens. Checked every 15 s.`
+          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. Anything that looks like a key, token or password is hidden as ••••. They use no AI tokens. Checked every 30 s.`
         }
       })
     }

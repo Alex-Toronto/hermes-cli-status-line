@@ -87,7 +87,7 @@ The plugin is one JavaScript file with no build step and no dependencies. It rea
 | Model per chat | `session.status` | on model switch, and every 5 min |
 | Chat start time | `session.list` | once per chat |
 | Subscription limits | `model.options` (Hermes's own cached limit data) | every 2 min |
-| Background commands | `process.list` | every 15 s |
+| Background commands | `process.list` | every 30 s |
 | Running subagents | `subagent.list` | when one starts or finishes; every 20 s while any run |
 | Live speed, finished subagents | `message.delta`, `reasoning.delta`, `subagent.*` events the app already receives | live |
 
