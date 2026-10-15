@@ -90,7 +90,9 @@ const TONE = {
   dim: 'var(--ui-text-tertiary)',
   strong: 'var(--ui-text-primary)',
   good: 'var(--ui-success)',
-  warn: 'color-mix(in srgb, var(--ui-success) 45%, var(--dt-destructive))',
+  accent: 'var(--ui-accent)',
+  // No theme token for amber; a fixed amber blended toward the theme's text keeps it readable on light and dark.
+  warn: 'color-mix(in srgb, #f59e0b 85%, var(--ui-text-primary))',
   bad: 'color-mix(in srgb, var(--dt-destructive) 80%, var(--ui-text-primary))',
   critical: 'var(--dt-destructive)'
 }
@@ -227,8 +229,10 @@ function useAccountLimits() {
     queryKey: [ID, 'model-options'],
     queryFn: () => host.request('model.options', {}),
     staleTime: 120_000,
-    // Missing providers or cold usage caches must never create a fast loop.
-    refetchInterval: 120_000,
+    // Missing providers or cold usage caches must never create a fast loop:
+    // a fixed 2-minute poll, plus ONE early re-check 20 s after an empty first
+    // answer (the usage cache warms in the background after that first call).
+    refetchInterval: limitsRefetchInterval,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1
@@ -239,6 +243,36 @@ function useAccountLimits() {
     const picked = pickWindows(row)
     return picked ? { ...p, ...picked, name: row?.name || p.label } : null
   }).filter(Boolean)
+}
+
+function limitsRefetchInterval(query) {
+  const state = query?.state ?? {}
+  const rows = state.data?.providers ?? []
+  const anyReported = LIMIT_PROVIDERS.some(p => pickWindows(rows.find(r => r.slug === p.slug)))
+  return state.dataUpdateCount === 1 && !anyReported ? 20_000 : 120_000
+}
+
+const $limitMode = atom('used') // 'used' | 'left'
+let saveLimitMode = () => {}
+function toggleLimitMode() {
+  const next = $limitMode.get() === 'left' ? 'used' : 'left'
+  $limitMode.set(next)
+  saveLimitMode(next)
+}
+
+// Background terminal processes owned by the focused chat (the same list the
+// app's process stack shows). Local registry read, so a 15 s poll is cheap.
+function useBackgroundProcesses(runtimeId, active) {
+  const { data } = useQuery({
+    queryKey: [ID, 'processes', runtimeId],
+    queryFn: () => host.request('process.list', { session_id: runtimeId }),
+    enabled: Boolean(runtimeId) && active,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: false,
+    retry: false
+  })
+  return (data?.processes ?? []).filter(p => !p.status || p.status === 'running')
 }
 
 function useNow(intervalMs) {
@@ -289,38 +323,79 @@ function Card({ title, rows, note }) {
   })
 }
 
-function Segment({ parts, card }) {
+function Segment({ parts, card, onClick }) {
   const inner = parts.map((p, j) =>
     jsx('span', { style: { color: TONE[p.tone], fontWeight: p.bold ? 600 : 400 }, children: p.text }, j)
   )
-  const span = jsx('span', { style: { cursor: card ? 'help' : 'default' }, children: inner })
+  const span = onClick
+    ? jsx('span', {
+        role: 'button',
+        tabIndex: 0,
+        onClick,
+        onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } },
+        style: { cursor: 'pointer' },
+        children: inner
+      })
+    : jsx('span', { style: { cursor: card ? 'help' : 'default' }, children: inner })
   return card ? jsx(Tip, { label: jsx(Card, card), children: span }) : span
 }
 
-function limitParts(l, compact) {
+// Subscription limits can be read as % used (default) or % left; a click on
+// either provider flips both. Each view has its own colour scheme.
+const clamp100 = v => Math.max(0, Math.min(100, v))
+
+// % left: theme accent while plenty remains, amber below 50% left, red below 20%,
+// bright red at 5% or less (mirrors the used scale's 50 / 80 / 95 thresholds).
+function leftTone(left) {
+  if (left == null) return 'dim'
+  if (left <= 5) return 'critical'
+  if (left < 20) return 'bad'
+  if (left < 50) return 'warn'
+  return 'accent'
+}
+
+// Windows that go ON the line: the 5-hour and weekly windows; if a provider
+// reports neither, its account-wide windows under their own names. Model-only
+// windows (Claude's Opus / Sonnet weeks) stay in the hover card.
+function lineWindows(l) {
+  const main = [l.short, l.week].filter(Boolean)
+  if (main.length) return main
+  return (l.extras || []).filter(w => !w.scope || w.scope === 'account')
+}
+
+function windowLabel(l, win) {
+  if (win === l.short) return '5h'
+  if (win === l.week) return 'wk'
+  return String(win.label || 'limit')
+}
+
+function limitParts(l, compact, mode = 'used') {
   const out = [part('dim', `${l.label} `)]
-  const windows = [l.short, l.week, ...l.extras].filter(Boolean)
-  windows.forEach((win, i) => {
+  lineWindows(l).forEach((win, i) => {
     if (i) out.push(part('dim', compact ? ' / ' : ' '))
-    const label = win === l.week ? 'wk' : String(win.label || 'limit')
-    const pct = Number(win.used_percent)
-    const remaining = Math.max(0, Math.min(100, 100 - pct))
-    out.push(part('dim', `${label} `), part(pctTone(pct), `${Math.round(remaining)}% left`, true))
+    const used = clamp100(Number(win.used_percent))
+    const value = mode === 'left'
+      ? part(leftTone(100 - used), `${Math.round(100 - used)}% left`, true)
+      : part(pctTone(used), `${Math.round(used)}%`, true)
+    out.push(part('dim', `${windowLabel(l, win)} `), value)
   })
   return out
 }
 
-function limitCard(l, now) {
-  const row = (name, win) =>
-    win ? [name, `${Math.max(0, Math.min(100, 100 - Number(win.used_percent))).toFixed(0)}% remaining · ${untilLabel(win.resets_at, now) || 'reset time unknown'}`] : null
+function limitCard(l, now, mode = 'used') {
+  const row = (name, win) => {
+    if (!win) return null
+    const used = clamp100(Number(win.used_percent))
+    return [name, `${used.toFixed(0)}% used · ${(100 - used).toFixed(0)}% left · ${untilLabel(win.resets_at, now) || 'reset time unknown'}`]
+  }
   return {
     title: `${l.name} subscription limits`,
     rows: [
-      row(l.short?.label || 'Short window', l.short),
-      row(l.week?.label || 'Weekly', l.week),
+      row('5-hour', l.short),
+      row('Weekly', l.week),
       ...l.extras.map(e => row(e.label, e))
     ].filter(Boolean),
-    note: 'How much of your plan\'s rolling allowance remains. At 0% requests are refused until the window resets. Refreshed every ~2 min.'
+    note: `Your plan's rolling allowances. When one is fully used, requests are refused until it resets. Refreshed every ~2 min. Click to show ${mode === 'left' ? '% used' : '% left'}.`
   }
 }
 
@@ -339,6 +414,8 @@ function StatusLine() {
   const storedId = useValue(host.state.focusedStoredSessionId)
   const startedAt = useSessionStartedAt(storedId)
   const limits = useAccountLimits()
+  const limitMode = useValue($limitMode)
+  const procs = useBackgroundProcesses(runtimeId, visible)
   const now = useNow(5_000)
   const cols = useColumns(ref, visible)
 
@@ -450,6 +527,19 @@ function StatusLine() {
         }
       })
     }
+    if (procs.length) {
+      segs.push({
+        parts: [part('strong', `⚙ ${procs.length}`, true)],
+        card: {
+          title: `Background ${procs.length === 1 ? 'process' : 'processes'}`,
+          rows: procs.slice(0, 6).map(p => [
+            p.uptime_seconds != null ? durationCompact(Number(p.uptime_seconds)) : '·',
+            String(p.command || p.session_id || '').replace(/\s+/g, ' ').slice(0, 60)
+          ]),
+          note: `Terminal commands this chat started in the background (servers, builds, watchers) that are still running${procs.length > 6 ? ` — showing 6 of ${procs.length}` : ''}. They use no AI tokens. Checked every 15 s.`
+        }
+      })
+    }
     if (durationSeg) segs.push(durationSeg)
     if (wide && u.total) {
       segs.push({
@@ -464,7 +554,9 @@ function StatusLine() {
   }
 
   if (!narrow) {
-    for (const l of limits) segs.push({ parts: limitParts(l, !wide), card: limitCard(l, now) })
+    for (const l of limits) {
+      segs.push({ parts: limitParts(l, !wide, limitMode), card: limitCard(l, now, limitMode), onClick: toggleLimitMode })
+    }
   }
 
   const children = []
@@ -486,6 +578,8 @@ export default {
   name: 'CLI Status Line',
   register(ctx) {
     $visible.set(ctx.storage.get('visible', true))
+    $limitMode.set(ctx.storage.get('limitMode', 'used') === 'left' ? 'left' : 'used')
+    saveLimitMode = mode => ctx.storage.set('limitMode', mode)
 
     ctx.register({
       id: 'line',
