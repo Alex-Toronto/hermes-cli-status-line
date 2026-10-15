@@ -25,7 +25,7 @@ Hover over any item for exact numbers and a short explanation.
 | `🗜️ 1` | How many times Hermes has compressed older turns to free up context. |
 | `⚙ 2` | Background terminal commands this chat started (servers, builds, watchers) that are still running. Hover to see them, with anything that looks like a key, token or password hidden. |
 | `⛓ 1` | Subagents (helpers) this chat has running, as Hermes lists them. Hermes reports a subagent's tokens only when it finishes, so the hover card then shows its speed: output tokens ÷ its whole run time, including time spent running tools. Shown while any run and for 5 minutes after. |
-| `4h 5m` | Session duration (clock time since the chat started, including idle time). |
+| `4h 5m` | Session duration (clock time since the chat started, including idle time). Works for bot chats too. |
 | `Σ48.1M` | Total tokens for the session (input + output). |
 | `Claude 5h … wk …` | Claude subscription limits: % of the 5-hour and weekly allowances used, with reset times on hover. Only reported windows appear. |
 | `GPT wk …` | ChatGPT/Codex subscription limits, shown the same way. Weekly-only accounts show no five-hour placeholder. |
@@ -55,14 +55,14 @@ The line shortens to fit the width of the chat box. Below 76 characters it uses 
 
 ## Install
 
-Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.1.0` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
+Install a numbered release rather than the latest `main`, so you get a version that has been reviewed and tested. Replace `v1.1.1` with the [latest release](https://github.com/Alex-Toronto/hermes-cli-status-line/releases). The folder must be named `cli-status-line`:
 
 ```bash
 # macOS / Linux
-git clone --branch v1.1.0 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
+git clone --branch v1.1.1 https://github.com/Alex-Toronto/hermes-cli-status-line ~/.hermes/desktop-plugins/cli-status-line
 
 # Windows (PowerShell)
-git clone --branch v1.1.0 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
+git clone --branch v1.1.1 https://github.com/Alex-Toronto/hermes-cli-status-line "$env:LOCALAPPDATA\hermes\desktop-plugins\cli-status-line"
 ```
 
 If you use a named Hermes profile, put it under that profile's folder instead: `<hermes home>/profiles/<name>/desktop-plugins/`.
@@ -111,7 +111,7 @@ The plugin relies on a few internal parts of the app: the text of `session.statu
 
 ### Not yet tested
 
-- **Light theme.** All colours come from the app's theme except the amber warning colour, which is a fixed amber blended toward the theme's text colour. It is expected to read well on light themes but hasn't been checked.
+- **Light theme — not tested.** Only the dark theme has been checked on screen. All colours come from the app's theme except the amber warning colour, a fixed amber blended toward the theme's text colour, which should read well on light themes. If anything is hard to read in light mode, please open an issue with a screenshot.
 - **macOS and Linux.** Only Windows 11 has been tested. The emoji fallback fonts listed cover all three systems.
 - **Other Hermes versions** than v0.22.0.
 - **Providers other than Claude and ChatGPT** on a real account: OpenRouter key limits, Zen and plugin providers are covered by the tests with made-up data only.
@@ -128,7 +128,7 @@ node --test limits.test.cjs speed.test.cjs
 
 They use made-up data and a minimal stand-in for the app to check polling, window selection, the used/left switch, labels, colours, the live and last-stretch speed, subagent tracking, the memory caps, secret hiding, and that the plugin saves nothing and makes no network requests of its own. They don't replace checking it in the app.
 
-They run automatically on GitHub for every pull request and every change to `main`.
+They run automatically on GitHub for every pull request and every change to `main`, and must pass before anything merges. Dependabot checks weekly for updates to the pinned GitHub Actions and opens a pull request when one is out.
 
 ## Credits
 
