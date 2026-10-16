@@ -12,16 +12,15 @@ function load(){
   return ctx.api
 }
 
-test('nothing is saved: no storage writes anywhere; old saved data is removed only if present',()=>{
-  assert.doesNotMatch(raw,/storage\.set\(/)
+test('registration writes no preferences and removes only obsolete test-build data',()=>{
   assert.doesNotMatch(raw,/localStorage|sessionStorage|indexedDB|document\.cookie/)
   const api=load()
   const removed=[]
-  const old={limitMode:'left'}
+  const old={limitMode:'left',visible:false,sessionAvg:42}
   const ctx={storage:{remove:k=>removed.push(k),get:(k,f)=>(k in old?old[k]:f),set:()=>{throw new Error('must not write')}},
     register:()=>{},onEvent:()=>{}}
   api.plugin.register(ctx)
-  assert.equal(removed.join(','),'limitMode')   // a fresh install touches nothing
+  assert.equal(removed.join(','),'visible,sessionAvg')
 })
 test('no network or code-loading of its own; only read-only Hermes requests',()=>{
   assert.doesNotMatch(raw,/\bfetch\(|XMLHttpRequest|WebSocket|EventSource|\beval\(|new Function|import\(|innerHTML|dangerouslySetInnerHTML/)

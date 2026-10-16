@@ -1,5 +1,7 @@
 # Hermes CLI Status Line
 
+Local test build: **1.2.1+preferences**, based on upstream `4d71ea2`. This is not a published upstream release. It remembers usage and context display choices through Hermes's client-local plugin storage; no gateway changes are needed.
+
 [![tests](https://github.com/Alex-Toronto/hermes-cli-status-line/actions/workflows/tests.yml/badge.svg)](https://github.com/Alex-Toronto/hermes-cli-status-line/actions/workflows/tests.yml)
 
 A one-line readout below the [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop chat box, styled after its terminal status bar.
@@ -30,7 +32,7 @@ Hover over an item for details. Items depend on available data.
 | `Σ48.1M` | Session input + output tokens summed across calls, including cached input. |
 | Provider limits | Reported allowances and reset times. Weekly-only accounts have no five-hour placeholder; model-specific windows stay in the hover card. |
 
-Context and **% used** colours: green below 50%, amber 50–80%, red above 80%, bright red at 95% or more. Click any provider item to switch all limits between **% used** and **% left**. Left uses theme accent at 50% or more, amber below 50%, red below 20%, bright red at 5% or less. Hover shows both values. Context and limit controls also work with **Tab, then Enter or Space**. Modes are shared across panes and reset on registration/app restart.
+Context and **% used** colours: green below 50%, amber 50–80%, red above 80%, bright red at 95% or more. Click any provider item to switch all limits between **% used** and **% left**. Left uses theme accent at 50% or more, amber below 50%, red below 20%, bright red at 5% or less. Hover shows both values. Context and limit controls also work with **Tab, then Enter or Space**. Modes are shared across panes, saved when changed, and restored on plugin reload/app restart. Fresh installs default to used and numbers + meter. If storage is unavailable, controls still work in memory but cannot remember changes.
 
 Any authenticated provider with reported usage windows can appear: Claude and GPT first, then OpenRouter key quotas, Zen or other provider plugins as available. With pooled accounts, the first account with windows is used. Nous Portal credits are not queried through `session.usage`.
 
@@ -89,8 +91,9 @@ Model, speed and completion trackers are capped at 20 chats; completions retain 
 
 ## Privacy and security
 
-- No plugin file writes, model calls, direct web requests, dynamic code loading or new persistent tracking.
-- Known old **test-build** keys `visible`, `limitMode`, `sessionAvg` are read for cleanup and removed **only if present**. Fresh installs perform no storage writes; view choices remain in memory.
+- No model calls, direct web requests, dynamic code loading or persistent usage tracking.
+- Only two display preferences are saved through Hermes's client-local plugin storage: `limitMode` (`used`/`left`) and `contextMode` (`both`/`bar`/`numbers`). No chat content, usage history, model data or credentials are saved. Choices are local to this desktop client; the plugin does not synchronize them across separate windows or devices.
+- Old test-build keys `visible` and `sessionAvg` are removed only if present; an existing `limitMode` is preserved. Registration does not write defaults. Show/hide remains session-only. Invalid saved modes fall back to defaults without rewriting them.
 - Only read-only Hermes RPCs are used. `model.options` reads cached usage and can request background provider refreshes by Hermes; local RPC does not mean no external backend activity.
 - Values are plain text, not HTML. This is a display choice, **not a plugin sandbox or security guarantee**.
 - Command/goal previews use **best-effort pattern redaction** (`••••`). Unrecognized secrets can remain visible; legitimate text can be hidden. Do not rely on it to sanitize screenshots or safely handle credentials.
