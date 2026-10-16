@@ -18,7 +18,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'cli-status-line'
-const VERSION = '1.2.1'
+const VERSION = '1.2.1+preferences'
 
 // ── formatters (ported 1:1 from the CLI) ───────────────────────────────────
 
@@ -443,12 +443,33 @@ function limitsRefetchInterval(query) {
 }
 
 const $limitMode = atom('used') // 'used' | 'left'
-function toggleLimitMode() {
-  $limitMode.set($limitMode.get() === 'left' ? 'used' : 'left')
+// Persist display choices only, in Hermes's client-local plugin namespace.
+// If storage is unavailable, controls still work for the current app session.
+let preferenceStorage
+function readPreference(key, allowed, fallback) {
+  try {
+    const value = preferenceStorage?.get(key, fallback)
+    return allowed.includes(value) ? value : fallback
+  } catch {
+    return fallback
+  }
 }
 
-// Keys earlier versions saved; removed on load so the plugin leaves nothing behind.
-const LEGACY_STORAGE_KEYS = ['visible', 'limitMode', 'sessionAvg']
+function savePreference(key, value) {
+  try {
+    preferenceStorage?.set(key, value)
+  } catch {
+    // A failed preference write must not break the readout or its controls.
+  }
+}
+
+function toggleLimitMode() {
+  $limitMode.set($limitMode.get() === 'left' ? 'used' : 'left')
+  savePreference('limitMode', $limitMode.get())
+}
+
+// Remove obsolete test-build data, but keep the used/left display preference.
+const LEGACY_STORAGE_KEYS = ['visible', 'sessionAvg']
 
 // Hide anything in displayed text that looks like a credential: KEY=value,
 // --token value / --password=value, "Authorization: Bearer x", URL user:pass@,
@@ -598,6 +619,7 @@ const $ctxMode = atom('both')
 function cycleCtxMode() {
   const i = CTX_MODES.indexOf($ctxMode.get())
   $ctxMode.set(CTX_MODES[(i + 1) % CTX_MODES.length])
+  savePreference('contextMode', $ctxMode.get())
 }
 
 // Parts for the merged context item. Medium width keeps the terminal's short
@@ -962,12 +984,17 @@ export default {
   name: 'CLI Status Line',
   version: VERSION,
   register(ctx) {
-    // Nothing is saved: settings reset to defaults when the app starts. Remove
-    // anything earlier versions of this plugin saved.
-    for (const key of LEGACY_STORAGE_KEYS) if (ctx.storage.get(key, undefined) !== undefined) ctx.storage.remove(key)
+    preferenceStorage = ctx.storage
+    for (const key of LEGACY_STORAGE_KEYS) {
+      try {
+        if (preferenceStorage?.get(key, undefined) !== undefined) preferenceStorage.remove(key)
+      } catch {
+        // Cleanup is best-effort when client storage is unavailable.
+      }
+    }
     $visible.set(true)
-    $limitMode.set('used')
-    $ctxMode.set('both')
+    $limitMode.set(readPreference('limitMode', ['used', 'left'], 'used'))
+    $ctxMode.set(readPreference('contextMode', CTX_MODES, 'both'))
 
     ctx.register({
       id: 'line',
